@@ -100,12 +100,13 @@ class MyMemoryManager : public SectionMemoryManager {
 };
 
 BPFModule::BPFModule(unsigned flags, TableStorage *ts, bool rw_engine_enabled,
-                     const std::string &maps_ns)
+                     const std::string &maps_ns, const std::string &other_id)
     : flags_(flags),
       rw_engine_enabled_(rw_engine_enabled),
       used_b_loader_(false),
       ctx_(new LLVMContext),
       id_(std::to_string((uintptr_t)this)),
+      other_id_(other_id),
       maps_ns_(maps_ns),
       ts_(ts) {
   InitializeNativeTarget();
@@ -475,7 +476,7 @@ unique_ptr<ExecutionEngine> BPFModule::finalize_rw(unique_ptr<Module> m) {
 int BPFModule::load_cfile(const string &file, bool in_memory, const char *cflags[], int ncflags) {
   ClangLoader clang_loader(&*ctx_, flags_);
   if (clang_loader.parse(&mod_, *ts_, file, in_memory, cflags, ncflags, id_,
-                         *func_src_, mod_src_, maps_ns_))
+                         *func_src_, mod_src_, maps_ns_, other_id_))
     return -1;
   return 0;
 }
@@ -488,7 +489,7 @@ int BPFModule::load_cfile(const string &file, bool in_memory, const char *cflags
 int BPFModule::load_includes(const string &text) {
   ClangLoader clang_loader(&*ctx_, flags_);
   if (clang_loader.parse(&mod_, *ts_, text, true, nullptr, 0, "", *func_src_,
-                         mod_src_, ""))
+                         mod_src_, "", ""))
     return -1;
   return 0;
 }
@@ -981,7 +982,8 @@ int BPFModule::load_b(const string &filename, const string &proto_filename) {
 
   BLoader b_loader(flags_);
   used_b_loader_ = true;
-  if (int rc = b_loader.parse(&*mod_, filename, proto_filename, *ts_, id_, maps_ns_))
+  if (int rc = b_loader.parse(&*mod_, filename, proto_filename, *ts_, id_, maps_ns_,
+                              other_id_))
     return rc;
   if (rw_engine_enabled_) {
     if (int rc = annotate())

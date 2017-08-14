@@ -1207,7 +1207,14 @@ bool BTypeVisitor::VisitVarDecl(VarDecl *Decl) {
       fe_.table_storage().Insert(maps_ns_path, table_it->second.dup());
       return true;
     }
-
+    // should I try to steal maps?
+    if (fe_.other_id() != "") {
+      Path other_id_path({fe_.other_id(), table.name});
+      if (fe_.table_storage().Find(other_id_path, table_it)) {
+        table = table_it->second.dup();
+        table.is_extern = true;
+      }
+    }
     if (!table.is_extern) {
       if (map_type == BPF_MAP_TYPE_UNSPEC) {
         error(Decl->getLocStart(), "unsupported map type: %0") << A->getName();
@@ -1336,11 +1343,13 @@ BFrontendAction::BFrontendAction(llvm::raw_ostream &os, unsigned flags,
                                  TableStorage &ts, const std::string &id,
                                  const std::string &main_path,
                                  FuncSource &func_src, std::string &mod_src,
-                                 const std::string &maps_ns)
+                                 const std::string &maps_ns,
+                                 const std::string &other_id)
     : os_(os),
       flags_(flags),
       ts_(ts),
       id_(id),
+      other_id_(other_id),
       maps_ns_(maps_ns),
       rewriter_(new Rewriter),
       main_path_(main_path),
