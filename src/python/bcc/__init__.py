@@ -287,6 +287,8 @@ class BPF(object):
         if text:
             self.module = lib.bpf_module_create_c_from_string(text.encode("ascii"),
                     self.debug, cflags_array, len(cflags_array))
+            if not self.module:
+                raise Exception("Failed to compile BPF text:\n%s" % text)
         else:
             src_file = BPF._find_file(src_file)
             hdr_file = BPF._find_file(hdr_file)
@@ -296,9 +298,8 @@ class BPF(object):
             else:
                 self.module = lib.bpf_module_create_c(src_file.encode("ascii"),
                         self.debug, cflags_array, len(cflags_array))
-
-        if not self.module:
-            raise Exception("Failed to compile BPF module %s" % src_file)
+            if not self.module:
+                raise Exception("Failed to compile BPF module %s" % src_file)
 
         for usdt_context in usdt_contexts:
             usdt_context.attach_uprobes(self)
@@ -477,10 +478,11 @@ class BPF(object):
             blacklist = set([line.rstrip().split()[1] for line in
                     blacklist_file])
         fns = []
-        with open("%s/available_filter_functions" % TRACEFS) as avail_file:
+        with open("/proc/kallsyms") as avail_file:
             for line in avail_file:
-                fn = line.rstrip().split()[0]
-                if re.match(event_re, fn) and fn not in blacklist:
+                (_, t, fn) = line.rstrip().split()[:3]
+                if (t.lower() in ['t', 'w']) and re.match(event_re, fn) \
+                    and fn not in blacklist:
                     fns.append(fn)
         return set(fns)     # Some functions may appear more than once
 
@@ -499,8 +501,7 @@ class BPF(object):
         del self.open_kprobes[name]
         _num_open_probes -= 1
 
-    def attach_kprobe(self, event="", fn_name="", event_re="",
-            pid=-1, cpu=0, group_fd=-1):
+    def attach_kprobe(self, event="", fn_name="", event_re=""):
 
         # allow the caller to glob multiple functions together
         if event_re:
@@ -508,8 +509,7 @@ class BPF(object):
             self._check_probe_quota(len(matches))
             for line in matches:
                 try:
-                    self.attach_kprobe(event=line, fn_name=fn_name, pid=pid,
-                            cpu=cpu, group_fd=group_fd)
+                    self.attach_kprobe(event=line, fn_name=fn_name)
                 except:
                     pass
             return
@@ -519,8 +519,8 @@ class BPF(object):
         fn = self.load_func(fn_name, BPF.KPROBE)
         ev_name = "p_" + event.replace("+", "_").replace(".", "_")
         res = lib.bpf_attach_kprobe(fn.fd, 0, ev_name.encode("ascii"),
-                event.encode("ascii"), pid, cpu, group_fd,
-                self._reader_cb_impl, ct.cast(id(self), ct.py_object))
+                event.encode("ascii"), self._reader_cb_impl,
+                ct.cast(id(self), ct.py_object))
         res = ct.cast(res, ct.c_void_p)
         if not res:
             raise Exception("Failed to attach BPF to kprobe")
@@ -538,15 +538,13 @@ class BPF(object):
             raise Exception("Failed to detach BPF from kprobe")
         self._del_kprobe(ev_name)
 
-    def attach_kretprobe(self, event="", fn_name="", event_re="",
-            pid=-1, cpu=0, group_fd=-1):
+    def attach_kretprobe(self, event="", fn_name="", event_re=""):
 
         # allow the caller to glob multiple functions together
         if event_re:
             for line in BPF.get_kprobe_functions(event_re):
                 try:
-                    self.attach_kretprobe(event=line, fn_name=fn_name, pid=pid,
-                            cpu=cpu, group_fd=group_fd)
+                    self.attach_kretprobe(event=line, fn_name=fn_name)
                 except:
                     pass
             return
@@ -556,8 +554,8 @@ class BPF(object):
         fn = self.load_func(fn_name, BPF.KPROBE)
         ev_name = "r_" + event.replace("+", "_").replace(".", "_")
         res = lib.bpf_attach_kprobe(fn.fd, 1, ev_name.encode("ascii"),
-                event.encode("ascii"), pid, cpu, group_fd,
-                self._reader_cb_impl, ct.cast(id(self), ct.py_object))
+                event.encode("ascii"), self._reader_cb_impl,
+                ct.cast(id(self), ct.py_object))
         res = ct.cast(res, ct.c_void_p)
         if not res:
             raise Exception("Failed to attach BPF to kprobe")
@@ -648,10 +646,13 @@ class BPF(object):
                         results.append(tp)
         return results
 
-    def attach_tracepoint(self, tp="", tp_re="", fn_name="", pid=-1,
-                          cpu=0, group_fd=-1):
-        """attach_tracepoint(tp="", tp_re="", fn_name="", pid=-1,
-                             cpu=0, group_fd=-1)
+    @staticmethod
+    def tracepoint_exists(category, event):
+        evt_dir = os.path.join(TRACEFS, "events", category, event)
+        return os.path.isdir(evt_dir)
+
+    def attach_tracepoint(self, tp="", tp_re="", fn_name=""):
+        """attach_tracepoint(tp="", tp_re="", fn_name="")
 
         Run the bpf function denoted by fn_name every time the kernel tracepoint
         specified by 'tp' is hit. The optional parameters pid, cpu, and group_fd
@@ -673,15 +674,14 @@ class BPF(object):
 
         if tp_re:
             for tp in BPF.get_tracepoints(tp_re):
-                self.attach_tracepoint(tp=tp, fn_name=fn_name, pid=pid,
-                                       cpu=cpu, group_fd=group_fd)
+                self.attach_tracepoint(tp=tp, fn_name=fn_name)
             return
 
         fn = self.load_func(fn_name, BPF.TRACEPOINT)
         (tp_category, tp_name) = tp.split(':')
         res = lib.bpf_attach_tracepoint(fn.fd, tp_category.encode("ascii"),
-                tp_name.encode("ascii"), pid, cpu, group_fd,
-                self._reader_cb_impl, ct.cast(id(self), ct.py_object))
+                tp_name.encode("ascii"), self._reader_cb_impl,
+                ct.cast(id(self), ct.py_object))
         res = ct.cast(res, ct.c_void_p)
         if not res:
             raise Exception("Failed to attach BPF to tracepoint")
@@ -794,9 +794,9 @@ class BPF(object):
             return "%s_%s_0x%x_%d" % (prefix, self._probe_repl.sub("_", path), addr, pid)
 
     def attach_uprobe(self, name="", sym="", sym_re="", addr=None,
-            fn_name="", pid=-1, cpu=0, group_fd=-1):
+            fn_name="", pid=-1):
         """attach_uprobe(name="", sym="", sym_re="", addr=None, fn_name=""
-                         pid=-1, cpu=0, group_fd=-1)
+                         pid=-1)
 
         Run the bpf function denoted by fn_name every time the symbol sym in
         the library or binary 'name' is encountered. The real address addr may
@@ -823,8 +823,7 @@ class BPF(object):
             self._check_probe_quota(len(addresses))
             for sym_addr in addresses:
                 self.attach_uprobe(name=name, addr=sym_addr,
-                                   fn_name=fn_name, pid=pid, cpu=cpu,
-                                   group_fd=group_fd)
+                                   fn_name=fn_name, pid=pid)
             return
 
         (path, addr) = BPF._check_path_symbol(name, sym, addr, pid)
@@ -833,8 +832,8 @@ class BPF(object):
         fn = self.load_func(fn_name, BPF.KPROBE)
         ev_name = self._get_uprobe_evname("p", path, addr, pid)
         res = lib.bpf_attach_uprobe(fn.fd, 0, ev_name.encode("ascii"),
-                path.encode("ascii"), addr, pid, cpu, group_fd,
-                self._reader_cb_impl, ct.cast(id(self), ct.py_object))
+                path.encode("ascii"), addr, pid, self._reader_cb_impl,
+                ct.cast(id(self), ct.py_object))
         res = ct.cast(res, ct.c_void_p)
         if not res:
             raise Exception("Failed to attach BPF to uprobe")
@@ -860,9 +859,9 @@ class BPF(object):
         self._del_uprobe(ev_name)
 
     def attach_uretprobe(self, name="", sym="", sym_re="", addr=None,
-            fn_name="", pid=-1, cpu=0, group_fd=-1):
+            fn_name="", pid=-1):
         """attach_uretprobe(name="", sym="", sym_re="", addr=None, fn_name=""
-                            pid=-1, cpu=0, group_fd=-1)
+                            pid=-1)
 
         Run the bpf function denoted by fn_name every time the symbol sym in
         the library or binary 'name' finishes execution. See attach_uprobe for
@@ -872,8 +871,7 @@ class BPF(object):
         if sym_re:
             for sym_addr in BPF.get_user_addresses(name, sym_re):
                 self.attach_uretprobe(name=name, addr=sym_addr,
-                                      fn_name=fn_name, pid=pid, cpu=cpu,
-                                      group_fd=group_fd)
+                                      fn_name=fn_name, pid=pid)
             return
 
         name = str(name)
@@ -883,8 +881,8 @@ class BPF(object):
         fn = self.load_func(fn_name, BPF.KPROBE)
         ev_name = self._get_uprobe_evname("r", path, addr, pid)
         res = lib.bpf_attach_uprobe(fn.fd, 1, ev_name.encode("ascii"),
-                path.encode("ascii"), addr, pid, cpu, group_fd,
-                self._reader_cb_impl, ct.cast(id(self), ct.py_object))
+                path.encode("ascii"), addr, pid, self._reader_cb_impl,
+                ct.cast(id(self), ct.py_object))
         res = ct.cast(res, ct.c_void_p)
         if not res:
             raise Exception("Failed to attach BPF to uprobe")
@@ -954,7 +952,16 @@ class BPF(object):
                 ts_end = line.find(":")
                 pid, cpu, flags, ts = line[:ts_end].split()
                 cpu = cpu[1:-1]
-                msg = line[ts_end + 4:]
+                # line[ts_end:] will have ": [sym_or_addr]: msgs"
+                # For trace_pipe debug output, the addr typically
+                # is invalid (e.g., 0x1). For kernel 4.12 or earlier,
+                # if address is not able to match a kernel symbol,
+                # nothing will be printed out. For kernel 4.13 and later,
+                # however, the illegal address will be printed out.
+                # Hence, both cases are handled here.
+                line = line[ts_end + 1:]
+                sym_end = line.find(":")
+                msg = line[sym_end + 2:]
                 return (task, int(pid), int(cpu), flags, float(ts), msg)
         except KeyboardInterrupt:
             exit()

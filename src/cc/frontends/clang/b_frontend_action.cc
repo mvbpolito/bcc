@@ -433,14 +433,17 @@ bool BTypeVisitor::VisitCallExpr(CallExpr *Call) {
           } else if (memb_name == "perf_read") {
             prefix = "bpf_perf_event_read";
             suffix = ")";
-	  } else if (memb_name == "redirect_map") {
-	    if(desc ->second.type == BPF_MAP_TYPE_DEVMAP) {
-	      prefix = "bpf_redirect_map";
-	      suffix = ")";
-	    } else {
-	      error(Call->getLocStart(), "redirect action only available on devmap maps");
+          } else if (memb_name == "perf_counter_value") {
+            prefix = "bpf_perf_event_read_value";
+            suffix = ")";
+	        } else if (memb_name == "redirect_map") {
+	          if(desc ->second.type == BPF_MAP_TYPE_DEVMAP) {
+	            prefix = "bpf_redirect_map";
+	            suffix = ")";
+	          } else {
+	            error(Call->getLocStart(), "redirect action only available on devmap maps");
               return false;
-	    }	    
+	          }	    
           } else {
             error(Call->getLocStart(), "invalid bpf_table operation %0") << memb_name;
             return false;
