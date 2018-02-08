@@ -39,6 +39,7 @@ template <class KeyType, class ValueType>
 class BPFTableBase {
  public:
   size_t capacity() { return desc.max_entries; }
+  int fd() const { return desc.fd; }
 
   StatusTuple string_to_key(const std::string& key_str, KeyType* key) {
     return desc.key_sscanf(key_str.c_str(), key);
