@@ -4,7 +4,7 @@
 #               parameters, with an optional filter.
 #
 # usage: trace [-h] [-p PID] [-L TID] [-v] [-Z STRING_SIZE] [-S]
-#              [-M MAX_EVENTS] [-T] [-t] [-K] [-U] [-I header]
+#              [-M MAX_EVENTS] [-T] [-t] [-K] [-U] [-a] [-I header]
 #              probe [probe ...]
 #
 # Licensed under the Apache License, Version 2.0 (the "License")
@@ -31,6 +31,7 @@ class Probe(object):
         use_localtime = True
         time_field = False
         print_cpu = False
+        print_address = False
         tgid = -1
         pid = -1
         page_cnt = None
@@ -42,6 +43,7 @@ class Probe(object):
                 cls.use_localtime = not args.timestamp
                 cls.time_field = cls.print_time and (not cls.use_localtime)
                 cls.print_cpu = args.print_cpu
+                cls.print_address = args.address
                 cls.first_ts = BPF.monotonic_time()
                 cls.tgid = args.tgid or -1
                 cls.pid = args.pid or -1
@@ -204,7 +206,8 @@ class Probe(object):
                 "$gid": "(unsigned)(bpf_get_current_uid_gid() >> 32)",
                 "$pid": "(unsigned)(bpf_get_current_pid_tgid() & 0xffffffff)",
                 "$tgid": "(unsigned)(bpf_get_current_pid_tgid() >> 32)",
-                "$cpu": "bpf_get_smp_processor_id()"
+                "$cpu": "bpf_get_smp_processor_id()",
+                "$task" : "((struct task_struct *)bpf_get_current_task())"
         }
 
         def _generate_streq_function(self, string):
@@ -473,13 +476,16 @@ BPF_PERF_OUTPUT(%s);
 
         def print_stack(self, bpf, stack_id, tgid):
             if stack_id < 0:
-                    print("        %d" % stack_id)
-                    return
+                print("        %d" % stack_id)
+                return
 
             stack = list(bpf.get_table(self.stacks_name).walk(stack_id))
             for addr in stack:
-                    print("        %s" % (bpf.sym(addr, tgid,
-                                         show_module=True, show_offset=True)))
+                print("        ", end="")
+                if Probe.print_address:
+                    print("%16x " % addr, end="")
+                print("%s" % (bpf.sym(addr, tgid,
+                                     show_module=True, show_offset=True)))
 
         def _format_message(self, bpf, tgid, values):
                 # Replace each %K with kernel sym and %U with user sym in tgid
@@ -606,6 +612,8 @@ trace -I 'net/sock.h' \\
       'udpv6_sendmsg(struct sock *sk) (sk->sk_dport == 13568)'
         Trace udpv6 sendmsg calls only if socket's destination port is equal
         to 53 (DNS; 13568 in big endian order)
+trace -I 'linux/fs_struct.h' 'mntns_install "users = %d", $task->fs->users'
+        Trace the number of users accessing the file system of the current task
 """
 
         def __init__(self):
@@ -642,6 +650,8 @@ trace -I 'net/sock.h' \\
                   action="store_true", help="output kernel stack trace")
                 parser.add_argument("-U", "--user-stack",
                   action="store_true", help="output user stack trace")
+                parser.add_argument("-a", "--address", action="store_true",
+                  help="print virtual address in stacks")
                 parser.add_argument(metavar="probe", dest="probes", nargs="+",
                   help="probe specifier (see examples)")
                 parser.add_argument("-I", "--include", action="append",
@@ -650,6 +660,8 @@ trace -I 'net/sock.h' \\
                        "as either full path, "
                        "or relative to current working directory, "
                        "or relative to default kernel header search path")
+                parser.add_argument("--ebpf", action="store_true",
+                  help=argparse.SUPPRESS)
                 self.args = parser.parse_args()
                 if self.args.tgid and self.args.pid:
                         parser.error("only one of -p and -L may be specified")
@@ -680,8 +692,10 @@ trace -I 'net/sock.h' \\
                         self.program += probe.generate_program(
                                         self.args.include_self)
 
-                if self.args.verbose:
+                if self.args.verbose or self.args.ebpf:
                         print(self.program)
+                        if self.args.ebpf:
+                                exit()
 
         def _attach_probes(self):
                 usdt_contexts = []

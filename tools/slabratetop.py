@@ -17,6 +17,7 @@
 
 from __future__ import print_function
 from bcc import BPF
+from bcc.utils import printb
 from time import sleep, strftime
 import argparse
 import signal
@@ -41,6 +42,8 @@ parser.add_argument("interval", nargs="?", default=1,
     help="output interval, in seconds")
 parser.add_argument("count", nargs="?", default=99999999,
     help="number of outputs")
+parser.add_argument("--ebpf", action="store_true",
+    help=argparse.SUPPRESS)
 args = parser.parse_args()
 interval = int(args.interval)
 countdown = int(args.count)
@@ -90,8 +93,10 @@ int kprobe__kmem_cache_alloc(struct pt_regs *ctx, struct kmem_cache *cachep)
     return 0;
 }
 """
-if debug:
+if debug or args.ebpf:
     print(bpf_text)
+    if args.ebpf:
+        exit()
 
 # initialize BPF
 b = BPF(text=bpf_text)
@@ -120,7 +125,7 @@ while 1:
     line = 0
     for k, v in reversed(sorted(counts.items(),
                                 key=lambda counts: counts[1].size)):
-        print("%-32s %6d %10d" % (k.name.decode(), v.count, v.size))
+        printb(b"%-32s %6d %10d" % (k.name, v.count, v.size))
 
         line += 1
         if line >= maxrows:

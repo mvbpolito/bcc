@@ -97,6 +97,8 @@ parser.add_argument("--stack-storage-size", default=10240,
 parser.add_argument("duration", nargs="?", default=99999999,
     type=positive_nonzero_int,
     help="duration of trace, in seconds")
+parser.add_argument("--ebpf", action="store_true",
+    help=argparse.SUPPRESS)
 
 # option logic
 args = parser.parse_args()
@@ -126,8 +128,7 @@ struct key_t {
     char name[TASK_COMM_LEN];
 };
 BPF_HASH(counts, struct key_t);
-BPF_HASH(start, u32);
-BPF_STACK_TRACE(stack_traces, STACK_STORAGE_SIZE)
+BPF_STACK_TRACE(stack_traces, STACK_STORAGE_SIZE);
 
 // This code gets a bit complex. Probably not suitable for casual hacking.
 
@@ -209,8 +210,10 @@ if not args.folded:
     else:
         print("... Hit Ctrl-C to end.")
 
-if debug:
+if debug or args.ebpf:
     print(bpf_text)
+    if args.ebpf:
+        exit()
 
 # initialize BPF & perf_events
 b = BPF(text=bpf_text)

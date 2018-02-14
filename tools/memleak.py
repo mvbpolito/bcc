@@ -97,6 +97,8 @@ parser.add_argument("-Z", "--max-size", type=int,
         help="capture only allocations smaller than this size")
 parser.add_argument("-O", "--obj", type=str, default="c",
         help="attach to allocator functions in the specified object")
+parser.add_argument("--ebpf", action="store_true",
+        help=argparse.SUPPRESS)
 
 args = parser.parse_args()
 
@@ -138,7 +140,7 @@ struct combined_alloc_info_t {
 BPF_HASH(sizes, u64);
 BPF_TABLE("hash", u64, struct alloc_info_t, allocs, 1000000);
 BPF_HASH(memptrs, u64, u64);
-BPF_STACK_TRACE(stack_traces, 10240)
+BPF_STACK_TRACE(stack_traces, 10240);
 BPF_TABLE("hash", u64, struct combined_alloc_info_t, combined_allocs, 10240);
 
 static inline void update_statistics_add(u64 stack_id, u64 sz) {
@@ -384,6 +386,10 @@ if not kernel_trace:
         stack_flags += "|BPF_F_USER_STACK"
 bpf_source = bpf_source.replace("STACK_FLAGS", stack_flags)
 
+if args.ebpf:
+    print(bpf_source)
+    exit()
+
 bpf = BPF(text=bpf_source)
 
 if not kernel_trace:
@@ -465,7 +471,7 @@ def print_outstanding():
                          key=lambda a: a.size)[-top_stacks:]
         for alloc in to_show:
                 print("\t%d bytes in %d allocations from stack\n\t\t%s" %
-                      (alloc.size, alloc.count, "\n\t\t".join(alloc.stack)))
+                      (alloc.size, alloc.count, b"\n\t\t".join(alloc.stack)))
 
 def print_outstanding_combined():
         stack_traces = bpf["stack_traces"]

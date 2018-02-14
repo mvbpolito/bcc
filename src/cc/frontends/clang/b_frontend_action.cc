@@ -17,6 +17,7 @@
 #include <linux/version.h>
 #include <sys/utsname.h>
 #include <unistd.h>
+#include <stdlib.h>
 
 #include <clang/AST/ASTConsumer.h>
 #include <clang/AST/ASTContext.h>
@@ -30,6 +31,7 @@
 #include "common.h"
 #include "loader.h"
 #include "table_storage.h"
+#include "arch_helper.h"
 
 #include "libbpf.h"
 
@@ -47,16 +49,35 @@ const char *calling_conv_regs_s390x[] = {"gprs[2]", "gprs[3]", "gprs[4]",
 
 const char *calling_conv_regs_arm64[] = {"regs[0]", "regs[1]", "regs[2]",
                                        "regs[3]", "regs[4]", "regs[5]"};
-// todo: support more archs
-#if defined(__powerpc__)
-const char **calling_conv_regs = calling_conv_regs_ppc;
-#elif defined(__s390x__)
-const char **calling_conv_regs = calling_conv_regs_s390x;
-#elif defined(__aarch64__)
-const char **calling_conv_regs = calling_conv_regs_arm64;
-#else
-const char **calling_conv_regs = calling_conv_regs_x86;
-#endif
+
+void *get_call_conv_cb(bcc_arch_t arch)
+{
+  const char **ret;
+
+  switch(arch) {
+    case BCC_ARCH_PPC:
+    case BCC_ARCH_PPC_LE:
+      ret = calling_conv_regs_ppc;
+      break;
+    case BCC_ARCH_S390X:
+      ret = calling_conv_regs_s390x;
+      break;
+    case BCC_ARCH_ARM64:
+      ret = calling_conv_regs_arm64;
+      break;
+    default:
+      ret = calling_conv_regs_x86;
+  }
+
+  return (void *)ret;
+}
+
+const char **get_call_conv(void) {
+  const char **ret;
+
+  ret = (const char **)run_arch_callback(get_call_conv_cb);
+  return ret;
+}
 
 using std::map;
 using std::move;
@@ -197,7 +218,7 @@ bool ProbeVisitor::VisitUnaryOperator(UnaryOperator *E) {
   Expr *sub = E->getSubExpr();
   string rhs = rewriter_.getRewrittenText(expansionRange(sub->getSourceRange()));
   string text;
-  text = "({ typeof(" + E->getType().getAsString() + ") _val; memset(&_val, 0, sizeof(_val));";
+  text = "({ typeof(" + E->getType().getAsString() + ") _val; __builtin_memset(&_val, 0, sizeof(_val));";
   text += " bpf_probe_read(&_val, sizeof(_val), (u64)";
   text += rhs + "); _val; })";
   rewriter_.ReplaceText(expansionRange(E->getSourceRange()), text);
@@ -233,7 +254,7 @@ bool ProbeVisitor::VisitMemberExpr(MemberExpr *E) {
   string rhs = rewriter_.getRewrittenText(expansionRange(SourceRange(rhs_start, E->getLocEnd())));
   string base_type = base->getType()->getPointeeType().getAsString();
   string pre, post;
-  pre = "({ typeof(" + E->getType().getAsString() + ") _val; memset(&_val, 0, sizeof(_val));";
+  pre = "({ typeof(" + E->getType().getAsString() + ") _val; __builtin_memset(&_val, 0, sizeof(_val));";
   pre += " bpf_probe_read(&_val, sizeof(_val), (u64)&";
   post = rhs + "); _val; })";
   rewriter_.InsertText(E->getLocStart(), pre);
@@ -256,6 +277,8 @@ BTypeVisitor::BTypeVisitor(ASTContext &C, BFrontendAction &fe)
     : C(C), diag_(C.getDiagnostics()), fe_(fe), rewriter_(fe.rewriter()), out_(llvm::errs()) {}
 
 bool BTypeVisitor::VisitFunctionDecl(FunctionDecl *D) {
+  const char **calling_conv_regs = get_call_conv();
+
   // put each non-static non-inline function decl in its own section, to be
   // extracted by the MemoryManager
   auto real_start_loc = rewriter_.getSourceMgr().getFileLoc(D->getLocStart());
@@ -377,7 +400,7 @@ bool BTypeVisitor::VisitCallExpr(CallExpr *Call) {
           txt += "typeof(" + name + ".leaf) *_leaf = " + lookup + ", &_key); ";
           txt += "if (_leaf) (*_leaf)++; ";
           if (desc->second.type == BPF_MAP_TYPE_HASH) {
-            txt += "else { typeof(" + name + ".leaf) _zleaf; memset(&_zleaf, 0, sizeof(_zleaf)); ";
+            txt += "else { typeof(" + name + ".leaf) _zleaf; __builtin_memset(&_zleaf, 0, sizeof(_zleaf)); ";
             txt += "_zleaf++; ";
             txt += update + ", &_key, &_zleaf, BPF_NOEXIST); } ";
           }
@@ -809,7 +832,8 @@ bool BTypeVisitor::VisitVarDecl(VarDecl *Decl) {
       return false;
     }
 
-    fe_.table_storage().VisitMapType(table, C, key_type, leaf_type);
+    if (!table.is_extern)
+      fe_.table_storage().VisitMapType(table, C, key_type, leaf_type);
     fe_.table_storage().Insert(local_path, move(table));
   } else if (const PointerType *P = Decl->getType()->getAs<PointerType>()) {
     // if var is a pointer to a packet type, clone the annotation into the var

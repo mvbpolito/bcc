@@ -91,6 +91,8 @@ parser.add_argument("-M", "--max-block-time", default=(1 << 64) - 1,
 parser.add_argument("--state", type=positive_int,
     help="filter on this thread state bitmask (eg, 2 == TASK_UNINTERRUPTIBLE" +
          ") see include/linux/sched.h")
+parser.add_argument("--ebpf", action="store_true",
+    help=argparse.SUPPRESS)
 args = parser.parse_args()
 if args.pid and args.tgid:
     parser.error("specify only one of -p and -t")
@@ -119,7 +121,7 @@ struct key_t {
 };
 BPF_HASH(counts, struct key_t);
 BPF_HASH(start, u32);
-BPF_STACK_TRACE(stack_traces, STACK_STORAGE_SIZE)
+BPF_STACK_TRACE(stack_traces, STACK_STORAGE_SIZE);
 
 int oncpu(struct pt_regs *ctx, struct task_struct *prev) {
     u32 pid = prev->pid;
@@ -222,8 +224,10 @@ if args.kernel_threads_only and args.user_stacks_only:
           "doesn't make sense.", file=stderr)
     exit(1)
 
-if (debug):
+if debug or args.ebpf:
     print(bpf_text)
+    if args.ebpf:
+        exit()
 
 # initialize BPF
 b = BPF(text=bpf_text)

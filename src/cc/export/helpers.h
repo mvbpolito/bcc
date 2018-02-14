@@ -191,7 +191,10 @@ struct bpf_stacktrace {
 };
 
 #define BPF_STACK_TRACE(_name, _max_entries) \
-  BPF_TABLE("stacktrace", int, struct bpf_stacktrace, _name, _max_entries);
+  BPF_TABLE("stacktrace", int, struct bpf_stacktrace, _name, _max_entries)
+
+#define BPF_PROG_ARRAY(_name, _max_entries) \
+  BPF_TABLE("prog", u32, u32, _name, _max_entries)
 
 // packet parsing state machine helpers
 #define cursor_advance(_cursor, _len) \
@@ -259,6 +262,30 @@ static int (*bpf_perf_event_read_value)(void *map, u64 flags, void *buf, u32 buf
   (void *) BPF_FUNC_perf_event_read_value;
 static int (*bpf_perf_prog_read_value)(void *ctx, void *buf, u32 buf_size) =
   (void *) BPF_FUNC_perf_prog_read_value;
+static int (*bpf_current_task_under_cgroup)(void *map, int index) =
+  (void *) BPF_FUNC_current_task_under_cgroup;
+static u32 (*bpf_get_socket_cookie)(void *ctx) =
+  (void *) BPF_FUNC_get_socket_cookie;
+static u64 (*bpf_get_socket_uid)(void *ctx) =
+  (void *) BPF_FUNC_get_socket_uid;
+static int (*bpf_getsockopt)(void *ctx, int level, int optname, void *optval, int optlen) =
+  (void *) BPF_FUNC_getsockopt;
+static int (*bpf_redirect_map)(void *map, int key, int flags) =
+  (void *) BPF_FUNC_redirect_map;
+static int (*bpf_set_hash)(void *ctx, u32 hash) =
+  (void *) BPF_FUNC_set_hash;
+static int (*bpf_setsockopt)(void *ctx, int level, int optname, void *optval, int optlen) =
+  (void *) BPF_FUNC_setsockopt;
+static int (*bpf_skb_adjust_room)(void *ctx, int len_diff, u32 mode, u64 flags) =
+  (void *) BPF_FUNC_skb_adjust_room;
+static int (*bpf_skb_under_cgroup)(void *ctx, void *map, int index) =
+  (void *) BPF_FUNC_skb_under_cgroup;
+static int (*bpf_sk_redirect_map)(void *ctx, void *map, int key, int flags) =
+  (void *) BPF_FUNC_sk_redirect_map;
+static int (*bpf_sock_map_update)(void *map, void *key, void *value, unsigned long long flags) =
+  (void *) BPF_FUNC_sock_map_update;
+static int (*bpf_xdp_adjust_meta)(void *ctx, int offset) =
+  (void *) BPF_FUNC_xdp_adjust_meta;
 
 /* bcc_get_stackid will return a negative value in the case of an error
  *
@@ -554,7 +581,37 @@ struct pt_regs;
 int bpf_usdt_readarg(int argc, struct pt_regs *ctx, void *arg) asm("llvm.bpf.extra");
 int bpf_usdt_readarg_p(int argc, struct pt_regs *ctx, void *buf, u64 len) asm("llvm.bpf.extra");
 
-#ifdef __powerpc__
+/* Scan the ARCH passed in from ARCH env variable (see kbuild_helper.cc) */
+#if defined(__TARGET_ARCH_x86)
+#define bpf_target_x86
+#define bpf_target_defined
+#elif defined(__TARGET_ARCH_s930x)
+#define bpf_target_s930x
+#define bpf_target_defined
+#elif defined(__TARGET_ARCH_arm64)
+#define bpf_target_arm64
+#define bpf_target_defined
+#elif defined(__TARGET_ARCH_powerpc)
+#define bpf_target_powerpc
+#define bpf_target_defined
+#else
+#undef bpf_target_defined
+#endif
+
+/* Fall back to what the compiler says */
+#ifndef bpf_target_defined
+#if defined(__x86_64__)
+#define bpf_target_x86
+#elif defined(__s390x__)
+#define bpf_target_s930x
+#elif defined(__aarch64__)
+#define bpf_target_arm64
+#elif defined(__powerpc__)
+#define bpf_target_powerpc
+#endif
+#endif
+
+#if defined(bpf_target_powerpc)
 #define PT_REGS_PARM1(ctx)	((ctx)->gpr[3])
 #define PT_REGS_PARM2(ctx)	((ctx)->gpr[4])
 #define PT_REGS_PARM3(ctx)	((ctx)->gpr[5])
@@ -564,7 +621,7 @@ int bpf_usdt_readarg_p(int argc, struct pt_regs *ctx, void *buf, u64 len) asm("l
 #define PT_REGS_RC(ctx)		((ctx)->gpr[3])
 #define PT_REGS_IP(ctx)		((ctx)->nip)
 #define PT_REGS_SP(ctx)		((ctx)->gpr[1])
-#elif defined(__s390x__)
+#elif defined(bpf_target_s930x)
 #define PT_REGS_PARM1(x) ((x)->gprs[2])
 #define PT_REGS_PARM2(x) ((x)->gprs[3])
 #define PT_REGS_PARM3(x) ((x)->gprs[4])
@@ -575,7 +632,7 @@ int bpf_usdt_readarg_p(int argc, struct pt_regs *ctx, void *buf, u64 len) asm("l
 #define PT_REGS_RC(x) ((x)->gprs[2])
 #define PT_REGS_SP(x) ((x)->gprs[15])
 #define PT_REGS_IP(x) ((x)->psw.addr)
-#elif defined(__x86_64__)
+#elif defined(bpf_target_x86)
 #define PT_REGS_PARM1(ctx)	((ctx)->di)
 #define PT_REGS_PARM2(ctx)	((ctx)->si)
 #define PT_REGS_PARM3(ctx)	((ctx)->dx)
@@ -586,7 +643,7 @@ int bpf_usdt_readarg_p(int argc, struct pt_regs *ctx, void *buf, u64 len) asm("l
 #define PT_REGS_RC(ctx)		((ctx)->ax)
 #define PT_REGS_IP(ctx)		((ctx)->ip)
 #define PT_REGS_SP(ctx)		((ctx)->sp)
-#elif defined(__aarch64__)
+#elif defined(bpf_target_arm64)
 #define PT_REGS_PARM1(x)	((x)->regs[0])
 #define PT_REGS_PARM2(x)	((x)->regs[1])
 #define PT_REGS_PARM3(x)	((x)->regs[2])
