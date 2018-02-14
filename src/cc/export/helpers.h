@@ -270,8 +270,6 @@ static u64 (*bpf_get_socket_uid)(void *ctx) =
   (void *) BPF_FUNC_get_socket_uid;
 static int (*bpf_getsockopt)(void *ctx, int level, int optname, void *optval, int optlen) =
   (void *) BPF_FUNC_getsockopt;
-static int (*bpf_redirect_map)(void *map, int key, int flags) =
-  (void *) BPF_FUNC_redirect_map;
 static int (*bpf_set_hash)(void *ctx, u32 hash) =
   (void *) BPF_FUNC_set_hash;
 static int (*bpf_setsockopt)(void *ctx, int level, int optname, void *optval, int optlen) =
