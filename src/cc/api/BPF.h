@@ -42,12 +42,12 @@ struct open_probe_t {
 class USDT;
 
 class BPF {
-public:
+ public:
   static const int BPF_MAX_STACK_DEPTH = 127;
 
   explicit BPF(unsigned int flag = 0, TableStorage* ts = nullptr,
                const std::string &maps_ns = "", const ebpf::BPF *other = nullptr)
-      : bpf_module_(new BPFModule(flag, ts, maps_ns, other == nullptr ? "" : other->bpf_module_->id())) {}
+      : flag_(flag), bpf_module_(new BPFModule(flag, ts, maps_ns, other == nullptr ? "" : other->bpf_module_->id())) {}
   StatusTuple init(const std::string& bpf_program,
                    const std::vector<std::string>& cflags = {},
                    const std::vector<USDT>& usdt = {});
@@ -55,32 +55,31 @@ public:
   ~BPF();
   StatusTuple detach_all();
 
-  StatusTuple attach_kprobe(
-      const std::string& kernel_func, const std::string& probe_func,
-      bpf_probe_attach_type = BPF_PROBE_ENTRY,
-      pid_t pid = -1, int cpu = 0, int group_fd = -1,
-      perf_reader_cb cb = nullptr, void* cb_cookie = nullptr);
+  StatusTuple attach_kprobe(const std::string& kernel_func,
+                            const std::string& probe_func,
+                            bpf_probe_attach_type = BPF_PROBE_ENTRY,
+                            perf_reader_cb cb = nullptr,
+                            void* cb_cookie = nullptr);
   StatusTuple detach_kprobe(
       const std::string& kernel_func,
       bpf_probe_attach_type attach_type = BPF_PROBE_ENTRY);
 
-  StatusTuple attach_uprobe(
-      const std::string& binary_path, const std::string& symbol,
-      const std::string& probe_func, uint64_t symbol_addr = 0,
-      bpf_probe_attach_type attach_type = BPF_PROBE_ENTRY,
-      pid_t pid = -1, int cpu = 0, int group_fd = -1,
-      perf_reader_cb cb = nullptr, void* cb_cookie = nullptr);
-  StatusTuple detach_uprobe(
-      const std::string& binary_path, const std::string& symbol,
-      uint64_t symbol_addr = 0,
-      bpf_probe_attach_type attach_type = BPF_PROBE_ENTRY);
-  StatusTuple attach_usdt(const USDT& usdt, pid_t pid = -1, int cpu = 0,
-                          int group_fd = -1);
+  StatusTuple attach_uprobe(const std::string& binary_path,
+                            const std::string& symbol,
+                            const std::string& probe_func,
+                            uint64_t symbol_addr = 0,
+                            bpf_probe_attach_type attach_type = BPF_PROBE_ENTRY,
+                            pid_t pid = -1, perf_reader_cb cb = nullptr,
+                            void* cb_cookie = nullptr);
+  StatusTuple detach_uprobe(const std::string& binary_path,
+                            const std::string& symbol, uint64_t symbol_addr = 0,
+                            bpf_probe_attach_type attach_type = BPF_PROBE_ENTRY,
+                            pid_t pid = -1);
+  StatusTuple attach_usdt(const USDT& usdt, pid_t pid = -1);
   StatusTuple detach_usdt(const USDT& usdt);
 
   StatusTuple attach_tracepoint(const std::string& tracepoint,
                                 const std::string& probe_func,
-                                pid_t pid = -1, int cpu = 0, int group_fd = -1,
                                 perf_reader_cb cb = nullptr,
                                 void* cb_cookie = nullptr);
   StatusTuple detach_tracepoint(const std::string& tracepoint);
@@ -116,19 +115,19 @@ public:
   }
 
   BPFProgTable get_prog_table(const std::string& name);
+  
+  BPFDevmapTable get_devmap_table(const std::string& name);
 
   BPFStackTable get_stack_table(const std::string& name,
                                 bool use_debug_file = true,
                                 bool check_debug_file_crc = true);
 
-  StatusTuple open_perf_event(const std::string& name,
-                              uint32_t type,
+  StatusTuple open_perf_event(const std::string& name, uint32_t type,
                               uint64_t config);
 
   StatusTuple close_perf_event(const std::string& name);
 
-  StatusTuple open_perf_buffer(const std::string& name,
-                               perf_reader_raw_cb cb,
+  StatusTuple open_perf_buffer(const std::string& name, perf_reader_raw_cb cb,
                                perf_reader_lost_cb lost_cb = nullptr,
                                void* cb_cookie = nullptr,
                                int page_cnt = DEFAULT_PERF_BUFFER_PAGE_CNT);
@@ -139,11 +138,11 @@ public:
                         int& fd);
   StatusTuple unload_func(const std::string& func_name);
 
-private:
+ private:
   std::string get_kprobe_event(const std::string& kernel_func,
                                bpf_probe_attach_type type);
   std::string get_uprobe_event(const std::string& binary_path, uint64_t offset,
-                               bpf_probe_attach_type type);
+                               bpf_probe_attach_type type, pid_t pid);
 
   StatusTuple detach_kprobe_event(const std::string& event, open_probe_t& attr);
   StatusTuple detach_uprobe_event(const std::string& event, open_probe_t& attr);
@@ -181,9 +180,10 @@ private:
 
   StatusTuple check_binary_symbol(const std::string& binary_path,
                                   const std::string& symbol,
-                                  uint64_t symbol_addr,
-                                  std::string &module_res,
-                                  uint64_t &offset_res);
+                                  uint64_t symbol_addr, std::string& module_res,
+                                  uint64_t& offset_res);
+
+  int flag_;
 
   std::unique_ptr<BPFModule> bpf_module_;
 
@@ -200,7 +200,7 @@ private:
 };
 
 class USDT {
-public:
+ public:
   USDT(const std::string& binary_path, const std::string& provider,
        const std::string& name, const std::string& probe_func)
       : initialized_(false),
@@ -219,7 +219,7 @@ public:
     return provider_ + ":" + name_ + " from " + binary_path_;
   }
 
-private:
+ private:
   StatusTuple init();
   bool initialized_;
 

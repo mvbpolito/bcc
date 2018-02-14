@@ -17,6 +17,7 @@
 #include <linux/version.h>
 #include <sys/utsname.h>
 #include <unistd.h>
+#include <stdlib.h>
 
 #include <clang/AST/ASTConsumer.h>
 #include <clang/AST/ASTContext.h>
@@ -26,8 +27,11 @@
 #include <clang/Rewrite/Core/Rewriter.h>
 
 #include "b_frontend_action.h"
+#include "bpf_module.h"
 #include "common.h"
+#include "loader.h"
 #include "table_storage.h"
+#include "arch_helper.h"
 
 #include "libbpf.h"
 
@@ -45,16 +49,35 @@ const char *calling_conv_regs_s390x[] = {"gprs[2]", "gprs[3]", "gprs[4]",
 
 const char *calling_conv_regs_arm64[] = {"regs[0]", "regs[1]", "regs[2]",
                                        "regs[3]", "regs[4]", "regs[5]"};
-// todo: support more archs
-#if defined(__powerpc__)
-const char **calling_conv_regs = calling_conv_regs_ppc;
-#elif defined(__s390x__)
-const char **calling_conv_regs = calling_conv_regs_s390x;
-#elif defined(__aarch64__)
-const char **calling_conv_regs = calling_conv_regs_arm64;
-#else
-const char **calling_conv_regs = calling_conv_regs_x86;
-#endif
+
+void *get_call_conv_cb(bcc_arch_t arch)
+{
+  const char **ret;
+
+  switch(arch) {
+    case BCC_ARCH_PPC:
+    case BCC_ARCH_PPC_LE:
+      ret = calling_conv_regs_ppc;
+      break;
+    case BCC_ARCH_S390X:
+      ret = calling_conv_regs_s390x;
+      break;
+    case BCC_ARCH_ARM64:
+      ret = calling_conv_regs_arm64;
+      break;
+    default:
+      ret = calling_conv_regs_x86;
+  }
+
+  return (void *)ret;
+}
+
+const char **get_call_conv(void) {
+  const char **ret;
+
+  ret = (const char **)run_arch_callback(get_call_conv_cb);
+  return ret;
+}
 
 using std::map;
 using std::move;
@@ -77,9 +100,9 @@ class ProbeChecker : public RecursiveASTVisitor<ProbeChecker> {
   }
   bool VisitCallExpr(CallExpr *E) {
     needs_probe_ = false;
-    return false;
-  }
-  bool VisitParenExpr(ParenExpr *E) {
+    if (VarDecl *V = dyn_cast<VarDecl>(E->getCalleeDecl())) {
+      needs_probe_ = V->getName() == "bpf_get_current_task";
+    }
     return false;
   }
   bool VisitDeclRefExpr(DeclRefExpr *E) {
@@ -107,7 +130,29 @@ class ProbeSetter : public RecursiveASTVisitor<ProbeSetter> {
   set<Decl *> *ptregs_;
 };
 
-ProbeVisitor::ProbeVisitor(ASTContext &C, Rewriter &rewriter) : C(C), rewriter_(rewriter) {}
+MapVisitor::MapVisitor(set<Decl *> &m) : m_(m) {}
+
+bool MapVisitor::VisitCallExpr(CallExpr *Call) {
+  if (MemberExpr *Memb = dyn_cast<MemberExpr>(Call->getCallee()->IgnoreImplicit())) {
+    StringRef memb_name = Memb->getMemberDecl()->getName();
+    if (DeclRefExpr *Ref = dyn_cast<DeclRefExpr>(Memb->getBase())) {
+      if (SectionAttr *A = Ref->getDecl()->getAttr<SectionAttr>()) {
+        if (!A->getName().startswith("maps"))
+          return true;
+
+        if (memb_name == "update" || memb_name == "insert") {
+          if (ProbeChecker(Call->getArg(1), ptregs_).needs_probe()) {
+            m_.insert(Ref->getDecl());
+          }
+        }
+      }
+    }
+  }
+  return true;
+}
+
+ProbeVisitor::ProbeVisitor(ASTContext &C, Rewriter &rewriter, set<Decl *> &m) :
+  C(C), rewriter_(rewriter), m_(m) {}
 
 bool ProbeVisitor::VisitVarDecl(VarDecl *Decl) {
   if (Expr *E = Decl->getInit()) {
@@ -140,6 +185,25 @@ bool ProbeVisitor::VisitBinaryOperator(BinaryOperator *E) {
   if (ProbeChecker(E->getRHS(), ptregs_).is_transitive()) {
     ProbeSetter setter(&ptregs_);
     setter.TraverseStmt(E->getLHS());
+  } else if (E->isAssignmentOp() && E->getRHS()->getStmtClass() == Stmt::CallExprClass) {
+    CallExpr *Call = dyn_cast<CallExpr>(E->getRHS());
+    if (MemberExpr *Memb = dyn_cast<MemberExpr>(Call->getCallee()->IgnoreImplicit())) {
+      StringRef memb_name = Memb->getMemberDecl()->getName();
+      if (DeclRefExpr *Ref = dyn_cast<DeclRefExpr>(Memb->getBase())) {
+        if (SectionAttr *A = Ref->getDecl()->getAttr<SectionAttr>()) {
+          if (!A->getName().startswith("maps"))
+            return true;
+
+          if (memb_name == "lookup" || memb_name == "lookup_or_init") {
+            if (m_.find(Ref->getDecl()) != m_.end()) {
+            // Retrieved an external pointer from a map, mark LHS as external pointer.
+              ProbeSetter setter(&ptregs_);
+              setter.TraverseStmt(E->getLHS());
+            }
+          }
+        }
+      }
+    }
   }
   return true;
 }
@@ -154,7 +218,7 @@ bool ProbeVisitor::VisitUnaryOperator(UnaryOperator *E) {
   Expr *sub = E->getSubExpr();
   string rhs = rewriter_.getRewrittenText(expansionRange(sub->getSourceRange()));
   string text;
-  text = "({ typeof(" + E->getType().getAsString() + ") _val; memset(&_val, 0, sizeof(_val));";
+  text = "({ typeof(" + E->getType().getAsString() + ") _val; __builtin_memset(&_val, 0, sizeof(_val));";
   text += " bpf_probe_read(&_val, sizeof(_val), (u64)";
   text += rhs + "); _val; })";
   rewriter_.ReplaceText(expansionRange(E->getSourceRange()), text);
@@ -169,13 +233,13 @@ bool ProbeVisitor::VisitMemberExpr(MemberExpr *E) {
     return true;
 
   Expr *base;
-  SourceLocation rhs_start, op;
+  SourceLocation rhs_start, member;
   bool found = false;
   for (MemberExpr *M = E; M; M = dyn_cast<MemberExpr>(M->getBase())) {
     memb_visited_.insert(M);
     rhs_start = M->getLocEnd();
     base = M->getBase();
-    op = M->getOperatorLoc();
+    member = M->getMemberLoc();
     if (M->isArrow()) {
       found = true;
       break;
@@ -183,19 +247,18 @@ bool ProbeVisitor::VisitMemberExpr(MemberExpr *E) {
   }
   if (!found)
     return true;
-  if (op.isInvalid()) {
-    error(base->getLocEnd(), "internal error: opLoc is invalid while preparing probe rewrite");
+  if (member.isInvalid()) {
+    error(base->getLocEnd(), "internal error: MemberLoc is invalid while preparing probe rewrite");
     return false;
   }
   string rhs = rewriter_.getRewrittenText(expansionRange(SourceRange(rhs_start, E->getLocEnd())));
   string base_type = base->getType()->getPointeeType().getAsString();
   string pre, post;
-  pre = "({ typeof(" + E->getType().getAsString() + ") _val; memset(&_val, 0, sizeof(_val));";
-  pre += " bpf_probe_read(&_val, sizeof(_val), (u64)";
-  post = " + offsetof(" + base_type + ", " + rhs + ")";
-  post += "); _val; })";
+  pre = "({ typeof(" + E->getType().getAsString() + ") _val; __builtin_memset(&_val, 0, sizeof(_val));";
+  pre += " bpf_probe_read(&_val, sizeof(_val), (u64)&";
+  post = rhs + "); _val; })";
   rewriter_.InsertText(E->getLocStart(), pre);
-  rewriter_.ReplaceText(expansionRange(SourceRange(op, E->getLocEnd())), post);
+  rewriter_.ReplaceText(expansionRange(SourceRange(member, E->getLocEnd())), post);
   return true;
 }
 
@@ -214,11 +277,16 @@ BTypeVisitor::BTypeVisitor(ASTContext &C, BFrontendAction &fe)
     : C(C), diag_(C.getDiagnostics()), fe_(fe), rewriter_(fe.rewriter()), out_(llvm::errs()) {}
 
 bool BTypeVisitor::VisitFunctionDecl(FunctionDecl *D) {
+  const char **calling_conv_regs = get_call_conv();
+
   // put each non-static non-inline function decl in its own section, to be
   // extracted by the MemoryManager
   auto real_start_loc = rewriter_.getSourceMgr().getFileLoc(D->getLocStart());
-  if (D->isExternallyVisible() && D->hasBody()) {
+  if (fe_.is_rewritable_ext_func(D)) {
     current_fn_ = D->getName();
+    string bd = rewriter_.getRewrittenText(expansionRange(D->getSourceRange()));
+    fe_.func_src_.set_src(current_fn_, bd);
+    fe_.func_range_[current_fn_] = expansionRange(D->getSourceRange());
     string attr = string("__attribute__((section(\"") + BPF_FN_PREFIX + D->getName().str() + "\")))\n";
     rewriter_.InsertText(real_start_loc, attr);
     if (D->param_size() > MAX_CALLING_CONV_REGS + 1) {
@@ -329,12 +397,14 @@ bool BTypeVisitor::VisitCallExpr(CallExpr *Call) {
           string lookup = "bpf_map_lookup_elem_(bpf_pseudo_fd(1, " + fd + ")";
           string update = "bpf_map_update_elem_(bpf_pseudo_fd(1, " + fd + ")";
           txt  = "({ typeof(" + name + ".key) _key = " + arg0 + "; ";
-          if (desc->second.type == BPF_MAP_TYPE_HASH) {
-            txt += "typeof(" + name + ".leaf) _zleaf; memset(&_zleaf, 0, sizeof(_zleaf)); ";
-            txt += update + ", &_key, &_zleaf, BPF_NOEXIST); ";
-          }
           txt += "typeof(" + name + ".leaf) *_leaf = " + lookup + ", &_key); ";
-          txt += "if (_leaf) (*_leaf)++; })";
+          txt += "if (_leaf) (*_leaf)++; ";
+          if (desc->second.type == BPF_MAP_TYPE_HASH) {
+            txt += "else { typeof(" + name + ".leaf) _zleaf; __builtin_memset(&_zleaf, 0, sizeof(_zleaf)); ";
+            txt += "_zleaf++; ";
+            txt += update + ", &_key, &_zleaf, BPF_NOEXIST); } ";
+          }
+          txt += "})";
         } else if (memb_name == "perf_submit") {
           string name = Ref->getDecl()->getName();
           string arg0 = rewriter_.getRewrittenText(expansionRange(Call->getArg(0)->getSourceRange()));
@@ -357,7 +427,7 @@ bool BTypeVisitor::VisitCallExpr(CallExpr *Call) {
           if (desc->second.type == BPF_MAP_TYPE_STACK_TRACE) {
             string arg0 =
                 rewriter_.getRewrittenText(expansionRange(Call->getArg(0)->getSourceRange()));
-            txt = "bpf_get_stackid(";
+            txt = "bcc_get_stackid(";
             txt += "bpf_pseudo_fd(1, " + fd + "), " + arg0;
             rewrite_end = Call->getArg(0)->getLocEnd();
             } else {
@@ -386,6 +456,17 @@ bool BTypeVisitor::VisitCallExpr(CallExpr *Call) {
           } else if (memb_name == "perf_read") {
             prefix = "bpf_perf_event_read";
             suffix = ")";
+          } else if (memb_name == "perf_counter_value") {
+            prefix = "bpf_perf_event_read_value";
+            suffix = ")";
+	        } else if (memb_name == "redirect_map") {
+	          if(desc ->second.type == BPF_MAP_TYPE_DEVMAP) {
+	            prefix = "bpf_redirect_map";
+	            suffix = ")";
+	          } else {
+	            error(Call->getLocStart(), "redirect action only available on devmap maps");
+              return false;
+	          }	    
           } else {
             error(Call->getLocStart(), "invalid bpf_table operation %0") << memb_name;
             return false;
@@ -619,6 +700,11 @@ bool BTypeVisitor::VisitVarDecl(VarDecl *Decl) {
 
     unsigned i = 0;
     for (auto F : RD->fields()) {
+      if (F->getType().getTypePtr()->isIncompleteType()) {
+        error(F->getLocStart(), "unknown type");
+        return false;
+      }
+
       size_t sz = C.getTypeSize(F->getType()) >> 3;
       if (F->getName() == "key") {
         if (sz == 0) {
@@ -634,8 +720,14 @@ bool BTypeVisitor::VisitVarDecl(VarDecl *Decl) {
         }
         table.leaf_size = sz;
         leaf_type = F->getType();
-      } else if (F->getName() == "data") {
-        table.max_entries = sz / table.leaf_size;
+      } else if (F->getName() == "max_entries") {
+        unsigned idx = F->getFieldIndex();
+        if (auto I = dyn_cast_or_null<InitListExpr>(Decl->getInit())) {
+          llvm::APSInt res;
+          if (I->getInit(idx)->EvaluateAsInt(res, C)) {
+            table.max_entries = res.getExtValue();
+          }
+        }
       } else if (F->getName() == "flags") {
         unsigned idx = F->getFieldIndex();
         if (auto I = dyn_cast_or_null<InitListExpr>(Decl->getInit())) {
@@ -663,6 +755,8 @@ bool BTypeVisitor::VisitVarDecl(VarDecl *Decl) {
       map_type = BPF_MAP_TYPE_LRU_PERCPU_HASH;
     } else if (A->getName() == "maps/lpm_trie") {
       map_type = BPF_MAP_TYPE_LPM_TRIE;
+    } else if (A->getName() == "maps/devmap") {
+      map_type = BPF_MAP_TYPE_DEVMAP;
     } else if (A->getName() == "maps/histogram") {
       map_type = BPF_MAP_TYPE_HASH;
       if (key_type->isSpecificBuiltinType(BuiltinType::Int))
@@ -728,7 +822,9 @@ bool BTypeVisitor::VisitVarDecl(VarDecl *Decl) {
       }
 
       table.type = map_type;
-      table.fd = bpf_create_map(map_type, table.key_size, table.leaf_size, table.max_entries, table.flags);
+      table.fd = bpf_create_map(map_type, table.name.c_str(),
+                                table.key_size, table.leaf_size,
+                                table.max_entries, table.flags);
     }
     if (table.fd < 0) {
       error(Decl->getLocStart(), "could not open bpf map: %0\nis %1 map type enabled in your kernel?") <<
@@ -736,7 +832,8 @@ bool BTypeVisitor::VisitVarDecl(VarDecl *Decl) {
       return false;
     }
 
-    fe_.table_storage().VisitMapType(table, C, key_type, leaf_type);
+    if (!table.is_extern)
+      fe_.table_storage().VisitMapType(table, C, key_type, leaf_type);
     fe_.table_storage().Insert(local_path, move(table));
   } else if (const PointerType *P = Decl->getType()->getAs<PointerType>()) {
     // if var is a pointer to a packet type, clone the annotation into the var
@@ -754,39 +851,90 @@ bool BTypeVisitor::VisitVarDecl(VarDecl *Decl) {
   return true;
 }
 
-BTypeConsumer::BTypeConsumer(ASTContext &C, BFrontendAction &fe) : visitor_(C, fe) {}
+// First traversal of AST to retrieve maps with external pointers.
+BTypeConsumer::BTypeConsumer(ASTContext &C, BFrontendAction &fe,
+                             Rewriter &rewriter, set<Decl *> &m)
+    : fe_(fe),
+      map_visitor_(m),
+      btype_visitor_(C, fe),
+      probe_visitor_(C, rewriter, m) {}
 
 bool BTypeConsumer::HandleTopLevelDecl(DeclGroupRef Group) {
-  for (auto D : Group)
-    visitor_.TraverseDecl(D);
-  return true;
-}
-
-ProbeConsumer::ProbeConsumer(ASTContext &C, Rewriter &rewriter)
-    : visitor_(C, rewriter) {}
-
-bool ProbeConsumer::HandleTopLevelDecl(DeclGroupRef Group) {
   for (auto D : Group) {
     if (FunctionDecl *F = dyn_cast<FunctionDecl>(D)) {
-      if (F->isExternallyVisible() && F->hasBody()) {
+      if (fe_.is_rewritable_ext_func(F)) {
         for (auto arg : F->parameters()) {
-          if (arg != F->getParamDecl(0) && !arg->getType()->isFundamentalType())
-            visitor_.set_ptreg(arg);
+          if (arg != F->getParamDecl(0) && !arg->getType()->isFundamentalType()) {
+            map_visitor_.set_ptreg(arg);
+          }
         }
-        visitor_.TraverseDecl(D);
+        map_visitor_.TraverseDecl(D);
       }
     }
   }
   return true;
 }
 
-BFrontendAction::BFrontendAction(llvm::raw_ostream &os, unsigned flags, TableStorage &ts,
-                                 const std::string &id, const std::string &maps_ns, const std::string &other_id)
-    : os_(os), flags_(flags), ts_(ts), id_(id), maps_ns_(maps_ns), other_id_(other_id), rewriter_(new Rewriter) {}
+void BTypeConsumer::HandleTranslationUnit(ASTContext &Context) {
+  DeclContext::decl_iterator it;
+  DeclContext *DC = TranslationUnitDecl::castToDeclContext(Context.getTranslationUnitDecl());
+
+  /**
+   * ProbeVisitor's traversal runs after an entire translation unit has been parsed.
+   * to make sure maps with external pointers have been identified.
+   */
+  for (it = DC->decls_begin(); it != DC->decls_end(); it++) {
+    Decl *D = *it;
+    if (FunctionDecl *F = dyn_cast<FunctionDecl>(D)) {
+      if (fe_.is_rewritable_ext_func(F)) {
+        for (auto arg : F->parameters()) {
+          if (arg != F->getParamDecl(0) && !arg->getType()->isFundamentalType())
+            probe_visitor_.set_ptreg(arg);
+        }
+        probe_visitor_.TraverseDecl(D);
+      }
+    }
+
+    btype_visitor_.TraverseDecl(D);
+  }
+}
+
+BFrontendAction::BFrontendAction(llvm::raw_ostream &os, unsigned flags,
+                                 TableStorage &ts, const std::string &id,
+                                 const std::string &main_path,
+                                 FuncSource &func_src, std::string &mod_src, 
+                                 const std::string &maps_ns, const std::string &other_id)
+    : os_(os),
+      flags_(flags),
+      ts_(ts),
+      id_(id),
+      rewriter_(new Rewriter),
+      main_path_(main_path),
+      func_src_(func_src),
+      mod_src_(mod_src),
+      maps_ns_(maps_ns),
+      other_id_(other_id) {}
+
+bool BFrontendAction::is_rewritable_ext_func(FunctionDecl *D) {
+  StringRef file_name = rewriter_->getSourceMgr().getFilename(D->getLocStart());
+  return (D->isExternallyVisible() && D->hasBody() &&
+          (file_name.empty() || file_name == main_path_));
+}
 
 void BFrontendAction::EndSourceFileAction() {
   if (flags_ & DEBUG_PREPROCESSOR)
     rewriter_->getEditBuffer(rewriter_->getSourceMgr().getMainFileID()).write(llvm::errs());
+  if (flags_ & DEBUG_SOURCE) {
+    llvm::raw_string_ostream tmp_os(mod_src_);
+    rewriter_->getEditBuffer(rewriter_->getSourceMgr().getMainFileID())
+        .write(tmp_os);
+  }
+
+  for (auto func : func_range_) {
+    auto f = func.first;
+    string bd = rewriter_->getRewrittenText(func_range_[f]);
+    func_src_.set_src_rewritten(f, bd);
+  }
   rewriter_->getEditBuffer(rewriter_->getSourceMgr().getMainFileID()).write(os_);
   os_.flush();
 }
@@ -794,8 +942,7 @@ void BFrontendAction::EndSourceFileAction() {
 unique_ptr<ASTConsumer> BFrontendAction::CreateASTConsumer(CompilerInstance &Compiler, llvm::StringRef InFile) {
   rewriter_->setSourceMgr(Compiler.getSourceManager(), Compiler.getLangOpts());
   vector<unique_ptr<ASTConsumer>> consumers;
-  consumers.push_back(unique_ptr<ASTConsumer>(new ProbeConsumer(Compiler.getASTContext(), *rewriter_)));
-  consumers.push_back(unique_ptr<ASTConsumer>(new BTypeConsumer(Compiler.getASTContext(), *this)));
+  consumers.push_back(unique_ptr<ASTConsumer>(new BTypeConsumer(Compiler.getASTContext(), *this, *rewriter_, m_)));
   return unique_ptr<ASTConsumer>(new MultiplexConsumer(std::move(consumers)));
 }
 

@@ -29,6 +29,7 @@
 #include <unistd.h>
 #include <utility>
 #include <vector>
+#include <iostream>
 #include <linux/bpf.h>
 
 #include <clang/Basic/FileManager.h>
@@ -49,13 +50,14 @@
 
 #include <llvm/IR/Module.h>
 
-#include "common.h"
 #include "bcc_exception.h"
+#include "bpf_module.h"
 #include "exported_files.h"
 #include "kbuild_helper.h"
 #include "b_frontend_action.h"
 #include "tp_frontend_action.h"
 #include "loader.h"
+#include "arch_helper.h"
 
 using std::map;
 using std::string;
@@ -64,15 +66,11 @@ using std::vector;
 
 namespace ebpf {
 
-map<string, unique_ptr<llvm::MemoryBuffer>> ClangLoader::remapped_files_;
-
 ClangLoader::ClangLoader(llvm::LLVMContext *ctx, unsigned flags)
     : ctx_(ctx), flags_(flags)
 {
-  if (remapped_files_.empty()) {
-    for (auto f : ExportedFiles::headers())
-      remapped_files_[f.first] = llvm::MemoryBuffer::getMemBuffer(f.second);
-  }
+  for (auto f : ExportedFiles::headers())
+    remapped_files_[f.first] = llvm::MemoryBuffer::getMemBuffer(f.second);
 }
 
 ClangLoader::~ClangLoader() {}
@@ -104,20 +102,34 @@ std::pair<bool, string> get_kernel_path_info(const string kdir)
 
 }
 
-int ClangLoader::parse(unique_ptr<llvm::Module> *mod, TableStorage &ts, const string &file,
-                       bool in_memory, const char *cflags[], int ncflags, const std::string &id,
-                       const std::string &maps_ns,  const std::string &other_id) {
+int ClangLoader::parse(unique_ptr<llvm::Module> *mod, TableStorage &ts,
+                       const string &file, bool in_memory, const char *cflags[],
+                       int ncflags, const std::string &id, FuncSource &func_src,
+                       std::string &mod_src, const std::string &maps_ns, const std::string &other_id) {
   using namespace clang;
-
+  
   string main_path = "/virtual/main.c";
   unique_ptr<llvm::MemoryBuffer> main_buf;
   struct utsname un;
   uname(&un);
-  string kdir = string(KERNEL_MODULES_DIR) + "/" + un.release;
-  auto kernel_path_info = get_kernel_path_info (kdir);
+  string kdir, kpath;
+  const char *kpath_env = ::getenv("BCC_KERNEL_SOURCE");
+  bool has_kpath_source = false;
+
+  if (kpath_env) {
+    kpath = string(kpath_env);
+  } else {
+    kdir = string(KERNEL_MODULES_DIR) + "/" + un.release;
+    auto kernel_path_info = get_kernel_path_info(kdir);
+    has_kpath_source = kernel_path_info.first;
+    kpath = kdir + "/" + kernel_path_info.second;
+  }
+
+  if (flags_ & DEBUG_PREPROCESSOR)
+    std::cout << "Running from kernel directory at: " << kpath.c_str() << "\n";
 
   // clang needs to run inside the kernel dir
-  DirStack dstack(kdir + "/" + kernel_path_info.second);
+  DirStack dstack(kpath);
   if (!dstack.ok())
     return -1;
 
@@ -134,7 +146,7 @@ int ClangLoader::parse(unique_ptr<llvm::Module> *mod, TableStorage &ts, const st
 
   // -fno-color-diagnostics: this is a workaround for a bug in llvm terminalHasColors() as of
   // 22 Jul 2016. Also see bcc #615.
-  // Enable -O2 for clang. In clang 5.0, -O0 may result in funciton marking as
+  // Enable -O2 for clang. In clang 5.0, -O0 may result in function marking as
   // noinline and optnone (if not always inlining).
   // Note that first argument is ignored in clang compilation invocation.
   vector<const char *> flags_cstr({"-O0", "-O2", "-emit-llvm", "-I", dstack.cwd(),
@@ -148,26 +160,99 @@ int ClangLoader::parse(unique_ptr<llvm::Module> *mod, TableStorage &ts, const st
                                    "-fno-asynchronous-unwind-tables",
                                    "-x", "c", "-c", abs_file.c_str()});
 
-  KBuildHelper kbuild_helper(kdir, kernel_path_info.first);
+  KBuildHelper kbuild_helper(kpath_env ? kpath : kdir, has_kpath_source);
+
   vector<string> kflags;
   if (kbuild_helper.get_flags(un.machine, &kflags))
     return -1;
-  kflags.push_back("-include");
-  kflags.push_back("/virtual/include/bcc/bpf.h");
-  kflags.push_back("-include");
-  kflags.push_back("/virtual/include/bcc/helpers.h");
-  kflags.push_back("-isystem");
-  kflags.push_back("/virtual/include");
+  if (flags_ & DEBUG_SOURCE)
+    flags_cstr.push_back("-g");
   for (auto it = kflags.begin(); it != kflags.end(); ++it)
     flags_cstr.push_back(it->c_str());
+
+  vector<const char *> flags_cstr_rem;
+  flags_cstr_rem.push_back("-include");
+  flags_cstr_rem.push_back("/virtual/include/bcc/helpers.h");
+  flags_cstr_rem.push_back("-isystem");
+  flags_cstr_rem.push_back("/virtual/include");
   if (cflags) {
     for (auto i = 0; i < ncflags; ++i)
-      flags_cstr.push_back(cflags[i]);
+      flags_cstr_rem.push_back(cflags[i]);
   }
 #ifdef CUR_CPU_IDENTIFIER
   string cur_cpu_flag = string("-DCUR_CPU_IDENTIFIER=") + CUR_CPU_IDENTIFIER;
-  flags_cstr.push_back(cur_cpu_flag.c_str());
+  flags_cstr_rem.push_back(cur_cpu_flag.c_str());
 #endif
+
+  if (do_compile(mod, ts, in_memory, flags_cstr, flags_cstr_rem, main_path,
+                 main_buf, id, func_src, mod_src, true, maps_ns, other_id)) {
+#if BCC_BACKUP_COMPILE != 1
+    return -1;
+#else
+    // try one more time to compile with system bpf.h
+    llvm::errs() << "WARNING: compilation failure, trying with system bpf.h\n";
+
+    ts.DeletePrefix(Path({id}));
+    func_src.clear();
+    mod_src.clear();
+    if (do_compile(mod, ts, in_memory, flags_cstr, flags_cstr_rem, main_path,
+                   main_buf, id, func_src, mod_src, false, maps_ns, other_id))
+      return -1;
+#endif
+  }
+
+  return 0;
+}
+
+void *get_clang_target_cb(bcc_arch_t arch)
+{
+  const char *ret;
+
+  switch(arch) {
+    case BCC_ARCH_PPC_LE:
+      ret = "powerpc64le-unknown-linux-gnu";
+      break;
+    case BCC_ARCH_PPC:
+      ret = "powerpc64-unknown-linux-gnu";
+      break;
+    case BCC_ARCH_S390X:
+      ret = "s390x-ibm-linux-gnu";
+      break;
+    case BCC_ARCH_ARM64:
+      ret = "aarch64-unknown-linux-gnu";
+      break;
+    default:
+      ret = "x86_64-unknown-linux-gnu";
+  }
+
+  return (void *)ret;
+}
+
+string get_clang_target(void) {
+  const char *ret;
+
+  ret = (const char *)run_arch_callback(get_clang_target_cb);
+  return string(ret);
+}
+
+int ClangLoader::do_compile(unique_ptr<llvm::Module> *mod, TableStorage &ts,
+                            bool in_memory,
+                            const vector<const char *> &flags_cstr_in,
+                            const vector<const char *> &flags_cstr_rem,
+                            const std::string &main_path,
+                            const unique_ptr<llvm::MemoryBuffer> &main_buf,
+                            const std::string &id, FuncSource &func_src,
+                            std::string &mod_src, bool use_internal_bpfh,
+                            const std::string &maps_ns, const std::string &other_id) {
+  using namespace clang;
+
+  vector<const char *> flags_cstr = flags_cstr_in;
+  if (use_internal_bpfh) {
+    flags_cstr.push_back("-include");
+    flags_cstr.push_back("/virtual/include/bcc/bpf.h");
+  }
+  flags_cstr.insert(flags_cstr.end(), flags_cstr_rem.begin(),
+                    flags_cstr_rem.end());
 
   // set up the error reporting class
   IntrusiveRefCntPtr<DiagnosticOptions> diag_opts(new DiagnosticOptions());
@@ -177,19 +262,10 @@ int ClangLoader::parse(unique_ptr<llvm::Module> *mod, TableStorage &ts, const st
   DiagnosticsEngine diags(DiagID, &*diag_opts, diag_client);
 
   // set up the command line argument wrapper
-#if defined(__powerpc64__)
-#if defined(_CALL_ELF) && _CALL_ELF == 2
-  driver::Driver drv("", "powerpc64le-unknown-linux-gnu", diags);
-#else
-  driver::Driver drv("", "powerpc64-unknown-linux-gnu", diags);
-#endif
-#elif defined(__s390x__)
-  driver::Driver drv("", "s390x-ibm-linux-gnu", diags);
-#elif defined(__aarch64__)
-  driver::Driver drv("", "aarch64-unknown-linux-gnu", diags);
-#else
-  driver::Driver drv("", "x86_64-unknown-linux-gnu", diags);
-#endif
+
+  string target_triple = get_clang_target();
+  driver::Driver drv("", target_triple, diags);
+
   drv.setTitle("bcc-clang-driver");
   drv.setCheckInputsExist(false);
 
@@ -277,7 +353,7 @@ int ClangLoader::parse(unique_ptr<llvm::Module> *mod, TableStorage &ts, const st
   // capture the rewritten c file
   string out_str1;
   llvm::raw_string_ostream os1(out_str1);
-  BFrontendAction bact(os1, flags_, ts, id, maps_ns, other_id);
+  BFrontendAction bact(os1, flags_, ts, id, main_path, func_src, mod_src, maps_ns, other_id);
   if (!compiler1.ExecuteAction(bact))
     return -1;
   unique_ptr<llvm::MemoryBuffer> out_buf1 = llvm::MemoryBuffer::getMemBuffer(out_str1);
@@ -313,5 +389,26 @@ int ClangLoader::parse(unique_ptr<llvm::Module> *mod, TableStorage &ts, const st
   return 0;
 }
 
+const char * FuncSource::src(const std::string& name) {
+  auto src = funcs_.find(name);
+  if (src == funcs_.end())
+    return "";
+  return src->second.src_.data();
+}
+
+const char * FuncSource::src_rewritten(const std::string& name) {
+  auto src = funcs_.find(name);
+  if (src == funcs_.end())
+    return "";
+  return src->second.src_rewritten_.data();
+}
+
+void FuncSource::set_src(const std::string& name, const std::string& src) {
+  funcs_[name].src_ = src;
+}
+
+void FuncSource::set_src_rewritten(const std::string& name, const std::string& src) {
+  funcs_[name].src_rewritten_ = src;
+}
 
 }  // namespace ebpf

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2016 PLUMgrid, Inc.
+ * Copyright (c) 2017 IBM Corporation
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -13,6 +13,22 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+#include <stdarg.h>
+#include <stdio.h>
 
-#pragma once
+int cmd_scanf(const char *cmd, const char *fmt, ...) {
+  va_list args;
+  FILE *pipe;
 
+  va_start(args, fmt);
+  pipe = popen(cmd, "r");
+  if (pipe == NULL) {
+    va_end(args);
+    return -1;
+  }
+
+  vfscanf(pipe, fmt, args);
+  va_end(args);
+  pclose(pipe);
+  return 0;
+}

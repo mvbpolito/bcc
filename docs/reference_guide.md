@@ -21,7 +21,10 @@ This guide is incomplete. If something feels missing, check the bcc and kernel s
         - [4. bpf_get_current_pid_tgid()](#4-bpf_get_current_pid_tgid)
         - [5. bpf_get_current_uid_gid()](#5-bpf_get_current_uid_gid)
         - [6. bpf_get_current_comm()](#6-bpf_get_current_comm)
-        - [7. bpf_log2l()](#7-bpflog2l)
+        - [7. bpf_get_current_task()](#7-bpf_get_current_task)
+        - [8. bpf_log2l()](#8-bpflog2l)
+    - [Debugging](#debugging)
+        - [1. bpf_override_return()](#1-bpf_override_return)
     - [Output](#output)
         - [1. bpf_trace_printk()](#1-bpf_trace_printk)
         - [2. BPF_PERF_OUTPUT](#2-bpf_perf_output)
@@ -34,14 +37,17 @@ This guide is incomplete. If something feels missing, check the bcc and kernel s
         - [5. BPF_STACK_TRACE](#5-bpf_stack_trace)
         - [6. BPF_PERF_ARRAY](#6-bpf_perf_array)
         - [7. BPF_PERCPU_ARRAY](#7-bpf_percpu_array)
-        - [8. map.lookup()](#8-maplookup)
-        - [9. map.lookup_or_init()](#9-maplookup_or_init)
-        - [10. map.delete()](#10-mapdelete)
-        - [11. map.update()](#11-mapupdate)
-        - [12. map.insert()](#12-mapinsert)
-        - [13. map.increment()](#13-mapincrement)
-        - [14. map.get_stackid()](#14-mapget_stackid)
-        - [15. map.perf_read()](#15-mapperf_read)
+        - [8. BPF_LPM_TRIE](#8-bpf_lpm_trie)
+        - [9. BPF_PROG_ARRAY](#9-bpf_prog_array)
+        - [10. map.lookup()](#10-maplookup)
+        - [11. map.lookup_or_init()](#11-maplookup_or_init)
+        - [12. map.delete()](#12-mapdelete)
+        - [13. map.update()](#13-mapupdate)
+        - [14. map.insert()](#14-mapinsert)
+        - [15. map.increment()](#15-mapincrement)
+        - [16. map.get_stackid()](#16-mapget_stackid)
+        - [17. map.perf_read()](#17-mapperf_read)
+        - [18. map.call()](#18-mapcall)
 
 - [bcc Python](#bcc-python)
     - [Initialization](#initialization)
@@ -141,6 +147,8 @@ This is a macro that instruments the tracepoint defined by *category*:*event*.
 
 Arguments are available in an ```args``` struct, which are the tracepoint arguments. One way to list these is to cat the relevant format file under /sys/kernel/debug/tracing/events/*category*/*event*/format.
 
+The ```args``` struct can be used in place of ``ctx`` in each functions requiring a context as an argument. This includes notably [perf_submit()](#3-perf_submit).
+
 For example:
 
 ```C
@@ -232,7 +240,7 @@ Examples in situ:
 
 ### 1. bpf_probe_read()
 
-Syntax: ```int bpf_probe_read(void *dst, int size, void *src)```
+Syntax: ```int bpf_probe_read(void *dst, int size, const void *src)```
 
 Return: 0 on success
 
@@ -244,7 +252,7 @@ Examples in situ:
 
 ### 2. bpf_probe_read_str()
 
-Syntax: ```int bpf_probe_read_str(void *dst, int size, void *src)```
+Syntax: ```int bpf_probe_read_str(void *dst, int size, const void *src)```
 
 Return:
   - \> 0 length of the string including the trailing NUL on success
@@ -311,7 +319,30 @@ Examples in situ:
 [search /examples](https://github.com/iovisor/bcc/search?q=bpf_get_current_comm+path%3Aexamples&type=Code),
 [search /tools](https://github.com/iovisor/bcc/search?q=bpf_get_current_comm+path%3Atools&type=Code)
 
-### 7. bpf_log2l()
+### 7. bpf_get_current_task()
+
+Syntax: ```bpf_get_current_task()```
+
+Return: current task as a pointer to struct task_struct.
+
+Returns a pointer to the current task's task_struct object. This helper can be used to compute the on-CPU time for a process, identify kernel threads, get the current CPU's run queue, or retrieve many other pieces of information.
+
+With Linux 4.13, due to issues with field randomization, you may need two #define directives before the includes:
+```C
+#define randomized_struct_fields_start  struct {
+#define randomized_struct_fields_end    };
+#include <linux/sched.h>
+
+int do_trace(void *ctx) {
+    struct task_struct *t = (struct task_struct *)bpf_get_current_task();
+[...]
+```
+
+Examples in situ:
+[search /examples](https://github.com/iovisor/bcc/search?q=bpf_get_current_task+path%3Aexamples&type=Code),
+[search /tools](https://github.com/iovisor/bcc/search?q=bpf_get_current_task+path%3Atools&type=Code)
+
+### 8. bpf_log2l()
 
 Syntax: ```unsigned int bpf_log2l(unsigned long v)```
 
@@ -320,6 +351,32 @@ Returns the log-2 of the provided value. This is often used to create indexes fo
 Examples in situ:
 [search /examples](https://github.com/iovisor/bcc/search?q=bpf_log2l+path%3Aexamples&type=Code),
 [search /tools](https://github.com/iovisor/bcc/search?q=bpf_log2l+path%3Atools&type=Code)
+
+## Debugging
+
+### 1. bpf_override_return()
+
+Syntax: ```int bpf_override_return(struct pt_regs *, unsigned long rc)```
+
+Return: 0 on success
+
+When used in a program attached to a function entry kprobe, causes the
+execution of the function to be skipped, immediately returning `rc` instead.
+This is used for targeted error injection. 
+
+bpf_override_return will only work when the kprobed function is whitelisted to
+allow error injections. Whitelisting entails tagging a function with
+`BPF_ALLOW_ERROR_INJECTION()` in the kernel source tree; see `io_ctl_init` for
+an example. If the kprobed function is not whitelisted, the bpf program will
+fail to attach with ` ioctl(PERF_EVENT_IOC_SET_BPF): Invalid argument`
+
+
+```C
+int kprobe__io_ctl_init(void *ctx) {
+	bpf_override_return(ctx, -ENOMEM);
+	return 0;
+}
+```
 
 ## Output
 
@@ -530,7 +587,42 @@ Examples in situ:
 [search /examples](https://github.com/iovisor/bcc/search?q=BPF_PERCPU_ARRAY+path%3Aexamples&type=Code),
 [search /tools](https://github.com/iovisor/bcc/search?q=BPF_PERCPU_ARRAY+path%3Atools&type=Code)
 
-### 8. map.lookup()
+### 8. BPF_LPM_TRIE
+
+Syntax: `BPF_LPM_TRIE(name [, key_type [, leaf_type [, size]]])`
+
+Creates a longest prefix match trie map named `name`, with optional parameters.
+
+Defaults: `BPF_LPM_TRIE(name, key_type=u64, leaf_type=u64, size=10240)`
+
+For example:
+
+```c
+BPF_LPM_TRIE(trie, struct key_v6);
+```
+
+This creates an LPM trie map named `trie` where the key is a `struct key_v6`, and the value defaults to u64.
+
+Methods (covered later): map.lookup(), map.lookup_or_init(), map.delete(), map.update(), map.insert(), map.increment().
+
+Examples in situ:
+[search /examples](https://github.com/iovisor/bcc/search?q=BPF_LPM_TRIE+path%3Aexamples&type=Code),
+[search /tools](https://github.com/iovisor/bcc/search?q=BPF_LPM_TRIE+path%3Atools&type=Code)
+
+### 9. BPF_PROG_ARRAY
+
+Syntax: ```BPF_PROG_ARRAY(name, size)```
+
+This creates a program array named ```name``` with ```size``` entries. Each entry of the array is either a file descriptor to a bpf program or ```NULL```. The array acts as a jump table so that bpf programs can "tail-call" other bpf programs.
+
+Methods (covered later): map.call().
+
+Examples in situ:
+[search /examples](https://github.com/iovisor/bcc/search?q=BPF_PROG_ARRAY+path%3Aexamples&type=Code),
+[search /tests](https://github.com/iovisor/bcc/search?q=BPF_PROG_ARRAY+path%3Atests&type=Code),
+[assign fd](https://github.com/iovisor/bcc/blob/master/examples/networking/tunnel_monitor/monitor.py#L24-L26)
+
+### 10. map.lookup()
 
 Syntax: ```*val map.lookup(&key)```
 
@@ -540,7 +632,7 @@ Examples in situ:
 [search /examples](https://github.com/iovisor/bcc/search?q=lookup+path%3Aexamples&type=Code),
 [search /tools](https://github.com/iovisor/bcc/search?q=lookup+path%3Atools&type=Code)
 
-### 9. map.lookup_or_init()
+### 11. map.lookup_or_init()
 
 Syntax: ```*val map.lookup_or_init(&key, &zero)```
 
@@ -550,7 +642,7 @@ Examples in situ:
 [search /examples](https://github.com/iovisor/bcc/search?q=lookup_or_init+path%3Aexamples&type=Code),
 [search /tools](https://github.com/iovisor/bcc/search?q=lookup_or_init+path%3Atools&type=Code)
 
-### 10. map.delete()
+### 12. map.delete()
 
 Syntax: ```map.delete(&key)```
 
@@ -560,7 +652,7 @@ Examples in situ:
 [search /examples](https://github.com/iovisor/bcc/search?q=delete+path%3Aexamples&type=Code),
 [search /tools](https://github.com/iovisor/bcc/search?q=delete+path%3Atools&type=Code)
 
-### 11. map.update()
+### 13. map.update()
 
 Syntax: ```map.update(&key, &val)```
 
@@ -570,7 +662,7 @@ Examples in situ:
 [search /examples](https://github.com/iovisor/bcc/search?q=update+path%3Aexamples&type=Code),
 [search /tools](https://github.com/iovisor/bcc/search?q=update+path%3Atools&type=Code)
 
-### 12. map.insert()
+### 14. map.insert()
 
 Syntax: ```map.insert(&key, &val)```
 
@@ -579,7 +671,7 @@ Associate the value in the second argument to the key, only if there was no prev
 Examples in situ:
 [search /examples](https://github.com/iovisor/bcc/search?q=insert+path%3Aexamples&type=Code)
 
-### 13. map.increment()
+### 15. map.increment()
 
 Syntax: ```map.increment(key)```
 
@@ -589,7 +681,7 @@ Examples in situ:
 [search /examples](https://github.com/iovisor/bcc/search?q=increment+path%3Aexamples&type=Code),
 [search /tools](https://github.com/iovisor/bcc/search?q=increment+path%3Atools&type=Code)
 
-### 14. map.get_stackid()
+### 16. map.get_stackid()
 
 Syntax: ```int map.get_stackid(void *ctx, u64 flags)```
 
@@ -599,7 +691,7 @@ Examples in situ:
 [search /examples](https://github.com/iovisor/bcc/search?q=get_stackid+path%3Aexamples&type=Code),
 [search /tools](https://github.com/iovisor/bcc/search?q=get_stackid+path%3Atools&type=Code)
 
-### 15. map.perf_read()
+### 17. map.perf_read()
 
 Syntax: ```u64 map.perf_read(u32 cpu)```
 
@@ -607,6 +699,45 @@ This returns the hardware performance counter as configured in [5. BPF_PERF_ARRA
 
 Examples in situ:
 [search /tests](https://github.com/iovisor/bcc/search?q=perf_read+path%3Atests&type=Code)
+
+### 18. map.call()
+
+Syntax: ```void map.call(void *ctx, int index)```
+
+This invokes ```bpf_tail_call()``` to tail-call the bpf program which the ```index``` entry in [9. BPF_PROG_ARRAY](#9-bpf_prog_array) points to. A tail-call is different from the normal call. It reuses the current stack frame after jumping to another bpf program and never goes back. If the ```index``` entry is empty, it won't jump anywhere and the program execution continues as normal.
+
+For example:
+
+```C
+BPF_PROG_ARRAY(prog_array, 10);
+
+int tail_call(void *ctx) {
+    bpf_trace_printk("Tail-call\n");
+    return 0;
+}
+
+int do_tail_call(void *ctx) {
+    bpf_trace_printk("Original program\n");
+    prog_array.call(ctx, 2);
+    return 0;
+}
+```
+
+```Python
+b = BPF(src_file="example.c")
+tail_fn = b.load_func("tail_call", BPF.KPROBE)
+prog_array = b.get_table("prog_array")
+prog_array[c_int(2)] = c_int(tail_fn.fd)
+b.attach_kprobe(event="some_kprobe_event", fn_name="do_tail_call")
+```
+
+This assigns ```tail_call()``` to ```prog_array[2]```. In the end of ```do_tail_call()```, ```prog_array.call(ctx, 2)``` tail-calls ```tail_call()``` and executes it.
+
+**NOTE:** To prevent infinite loop, the maximun number of tail-calls is 32 ([```MAX_TAIL_CALL_CNT```](https://github.com/torvalds/linux/search?l=C&q=MAX_TAIL_CALL_CNT+path%3Ainclude%2Flinux&type=Code)).
+
+Examples in situ:
+[search /examples](https://github.com/iovisor/bcc/search?l=C&q=call+path%3Aexamples&type=Code),
+[search /tests](https://github.com/iovisor/bcc/search?l=C&q=call+path%3Atests&type=Code)
 
 # bcc Python
 

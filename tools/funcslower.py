@@ -11,6 +11,9 @@
 # return from each function. For commonly-invoked functions like memory allocs
 # or file writes, this can be extremely expensive. Mind the overhead.
 #
+# NOTE: This tool cannot trace nested functions in the same invocation
+# due to instrumentation specifics, only innermost calls will be visible.
+#
 # By default, a minimum millisecond threshold of 1 is used.
 #
 # Copyright 2017, Sasha Goldshtein
@@ -52,6 +55,8 @@ parser.add_argument("-v", "--verbose", action="store_true",
     help="print the BPF program for debugging purposes")
 parser.add_argument(metavar="function", nargs="+", dest="functions",
     help="function(s) to trace")
+parser.add_argument("--ebpf", action="store_true",
+    help=argparse.SUPPRESS)
 
 args = parser.parse_args()
 # fractions are allowed, but rounded to an integer nanosecond
@@ -151,7 +156,7 @@ bpf_text = bpf_text.replace('DURATION_NS', str(duration_ns))
 if args.arguments:
     bpf_text = "#define GRAB_ARGS\n" + bpf_text
 if args.tgid:
-    bpf_text = bpf_text.replace('TGID_FILTER', 'tgid != %d' % tgid)
+    bpf_text = bpf_text.replace('TGID_FILTER', 'tgid != %d' % args.tgid)
 else:
     bpf_text = bpf_text.replace('TGID_FILTER', '0')
 
@@ -162,8 +167,10 @@ int trace_%d(struct pt_regs *ctx) {
 }
 """ % (i, i)
 
-if args.verbose:
+if args.verbose or args.ebpf:
     print(bpf_text)
+    if args.ebpf:
+        exit()
 
 b = BPF(text=bpf_text)
 

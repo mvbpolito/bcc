@@ -4,10 +4,13 @@
 
 from bcc import BPF
 import ctypes as ct
-from unittest import main, TestCase
+from unittest import main, skipUnless, TestCase
 import os
 import sys
+import socket
+import struct
 from contextlib import contextmanager
+import distutils.version
 
 @contextmanager
 def redirect_stderr(to):
@@ -20,6 +23,17 @@ def redirect_stderr(to):
         finally:
             sys.stderr.flush()
             os.dup2(copied.fileno(), stderr_fd)
+
+def kernel_version_ge(major, minor):
+    # True if running kernel is >= X.Y
+    version = distutils.version.LooseVersion(os.uname()[2]).version
+    if version[0] > major:
+        return True
+    if version[0] < major:
+        return False
+    if minor and version[1] < minor:
+        return False
+    return True
 
 class TestClang(TestCase):
     def test_complex(self):
@@ -341,6 +355,17 @@ int trace_entry(struct pt_regs *ctx, struct request *req) {
         b = BPF(text=text)
         fn = b.load_func("trace_entry", BPF.KPROBE)
 
+    def test_paren_probe_read(self):
+        text = """
+#include <net/inet_sock.h>
+int trace_entry(struct pt_regs *ctx, struct sock *sk) {
+    u16 sport = ((struct inet_sock *)sk)->inet_sport;
+    return sport;
+}
+"""
+        b = BPF(text=text)
+        fn = b.load_func("trace_entry", BPF.KPROBE)
+
     def test_complex_leaf_types(self):
         text = """
 struct list;
@@ -375,6 +400,7 @@ BPF_ARRAY(t3, union emptyu, 1);
     def test_exported_maps(self):
         b1 = BPF(text="""BPF_TABLE_PUBLIC("hash", int, int, table1, 10);""")
         b2 = BPF(text="""BPF_TABLE("extern", int, int, table1, 10);""")
+        t = b2["table1"]
 
     def test_syntax_error(self):
         with self.assertRaises(Exception):
@@ -400,7 +426,7 @@ int many(struct pt_regs *ctx, int a, int b, int c, int d, int e, int f, int g) {
 
     def test_call_macro_arg(self):
         text = """
-BPF_TABLE("prog", u32, u32, jmp, 32);
+BPF_PROG_ARRAY(jmp, 32);
 
 #define JMP_IDX_PIPE (1U << 1)
 
@@ -416,7 +442,7 @@ int process(struct xdp_md *ctx) {
         """
         b = BPF(text=text)
         t = b["jmp"]
-        self.assertEquals(len(t), 32);
+        self.assertEqual(len(t), 32);
 
     def test_update_macro_arg(self):
         text = """
@@ -436,7 +462,37 @@ int process(struct xdp_md *ctx) {
         """
         b = BPF(text=text)
         t = b["act"]
-        self.assertEquals(len(t), 32);
+        self.assertEqual(len(t), 32);
+
+    def test_ext_ptr_maps(self):
+        bpf_text = """
+#include <uapi/linux/ptrace.h>
+#include <net/sock.h>
+#include <bcc/proto.h>
+
+BPF_HASH(currsock, u32, struct sock *);
+
+int trace_entry(struct pt_regs *ctx, struct sock *sk,
+    struct sockaddr *uaddr, int addr_len) {
+    u32 pid = bpf_get_current_pid_tgid();
+    currsock.update(&pid, &sk);
+    return 0;
+};
+
+int trace_exit(struct pt_regs *ctx) {
+    u32 pid = bpf_get_current_pid_tgid();
+    struct sock **skpp;
+    skpp = currsock.lookup(&pid);
+    if (skpp) {
+        struct sock *skp = *skpp;
+        return skp->__sk_common.skc_dport;
+    }
+    return 0;
+}
+        """
+        b = BPF(text=bpf_text)
+        b.load_func("trace_entry", BPF.KPROBE)
+        b.load_func("trace_exit", BPF.KPROBE)
 
     def test_bpf_dins_pkt_rewrite(self):
         text = """
@@ -453,6 +509,18 @@ int dns_test(struct __sk_buff *skb) {
 }
         """
         b = BPF(text=text)
+
+    @skipUnless(kernel_version_ge(4,8), "requires kernel >= 4.8")
+    def test_ext_ptr_from_helper(self):
+        text = """
+#include <linux/sched.h>
+int test(struct pt_regs *ctx) {
+    struct task_struct *task = (struct task_struct *)bpf_get_current_task();
+    return task->prio;
+}
+"""
+        b = BPF(text=text)
+        fn = b.load_func("test", BPF.KPROBE)
 
     def test_unary_operator(self):
         text = """
@@ -539,7 +607,7 @@ void do_trace(struct pt_regs *ctx) {
 
     def test_prog_array_delete(self):
         text = """
-BPF_TABLE("prog", int, int, dummy, 256);
+BPF_PROG_ARRAY(dummy, 256);
 """
         b1 = BPF(text=text)
         text = """
@@ -566,6 +634,70 @@ int foo(struct pt_regs *ctx) {
 """
         with self.assertRaises(Exception):
             b = BPF(text=text)
+
+    def test_incomplete_type(self):
+        text = """
+BPF_HASH(drops, struct key_t);
+struct key_t {
+    u64 location;
+};
+"""
+        with self.assertRaises(Exception):
+            b = BPF(text=text)
+
+    def test_enumerations(self):
+        text = """
+enum b {
+    CHOICE_A,
+};
+struct a {
+    enum b test;
+};
+BPF_HASH(drops, struct a);
+        """
+        b = BPF(text=text)
+
+    def test_int128_types(self):
+        text = """
+BPF_HASH(table1, unsigned __int128, __int128);
+"""
+        b = BPF(text=text)
+        table = b['table1']
+        self.assertEqual(ct.sizeof(table.Key), 16)
+        self.assertEqual(ct.sizeof(table.Leaf), 16)
+        table[
+            table.Key.from_buffer_copy(
+                socket.inet_pton(socket.AF_INET6, "2001:db8::"))
+        ] = table.Leaf.from_buffer_copy(struct.pack('LL', 42, 123456789))
+        for k, v in table.items():
+            self.assertEqual(v[0], 42)
+            self.assertEqual(v[1], 123456789)
+            self.assertEqual(socket.inet_ntop(socket.AF_INET6,
+                                              struct.pack('LL', k[0], k[1])),
+                             "2001:db8::")
+
+    def test_padding_types(self):
+        text = """
+struct key_t {
+  u32 f1_1;               /* offset 0 */
+  struct {
+    char f2_1;            /* offset 16 */
+    __int128 f2_2;        /* offset 32 */
+  };
+  u8 f1_3;                /* offset 48 */
+  unsigned __int128 f1_4; /* offset 64 */
+  char f1_5;              /* offset 80 */
+};
+struct value_t {
+  u8 src[4] __attribute__ ((aligned (8))); /* offset 0 */
+  u8 dst[4] __attribute__ ((aligned (8))); /* offset 8 */
+};
+BPF_HASH(table1, struct key_t, struct value_t);
+"""
+        b = BPF(text=text)
+        table = b['table1']
+        self.assertEqual(ct.sizeof(table.Key), 96)
+        self.assertEqual(ct.sizeof(table.Leaf), 16)
 
 
 if __name__ == "__main__":

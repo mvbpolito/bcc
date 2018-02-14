@@ -87,6 +87,8 @@ parser.add_argument("interval", nargs="?", default=-1,
     help="output interval, in seconds")
 parser.add_argument("count", nargs="?", default=99999999,
     help="number of outputs")
+parser.add_argument("--ebpf", action="store_true",
+    help=argparse.SUPPRESS)
 args = parser.parse_args()
 countdown = int(args.count)
 frequency = 99
@@ -144,8 +146,8 @@ int do_perf_event(struct bpf_perf_event_data *ctx)
     struct task_struct *task = NULL;
     struct cfs_rq_partial *my_q = NULL;
     task = (struct task_struct *)bpf_get_current_task();
-    bpf_probe_read(&my_q, sizeof(my_q), &task->se.cfs_rq);
-    bpf_probe_read(&len, sizeof(len), &my_q->nr_running);
+    my_q = (struct cfs_rq_partial *)task->se.cfs_rq;
+    len = my_q->nr_running;
 
     struct data_t data = {.ts = now, .cpu = cpu, .len = len};
     events.perf_submit(ctx, &data, sizeof(data));
@@ -155,8 +157,10 @@ int do_perf_event(struct bpf_perf_event_data *ctx)
 """
 
 # code substitutions
-if debug:
+if debug or args.ebpf:
     print(bpf_text)
+    if args.ebpf:
+        exit()
 
 # initialize BPF & perf_events
 b = BPF(text=bpf_text)

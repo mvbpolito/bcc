@@ -34,6 +34,8 @@ parser = argparse.ArgumentParser(
     epilog=examples)
 parser.add_argument("-p", "--pid",
     help="trace this PID only")
+parser.add_argument("--ebpf", action="store_true",
+    help=argparse.SUPPRESS)
 args = parser.parse_args()
 debug = 0
 
@@ -103,7 +105,7 @@ DNAME_INLINE_LEN = 255        # linux/dcache.h
 
 class Data(ct.Structure):
     _fields_ = [
-        ("pid", ct.c_ulonglong),
+        ("pid", ct.c_uint),
         ("delta", ct.c_ulonglong),
         ("comm", ct.c_char * TASK_COMM_LEN),
         ("fname", ct.c_char * DNAME_INLINE_LEN)
@@ -114,8 +116,10 @@ if args.pid:
         'if (pid != %s) { return 0; }' % args.pid)
 else:
     bpf_text = bpf_text.replace('FILTER', '')
-if debug:
+if debug or args.ebpf:
     print(bpf_text)
+    if args.ebpf:
+        exit()
 
 # initialize BPF
 b = BPF(text=bpf_text)

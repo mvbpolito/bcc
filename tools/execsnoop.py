@@ -18,6 +18,8 @@
 
 from __future__ import print_function
 from bcc import BPF
+from bcc.utils import ArgString, printb
+import bcc.utils as utils
 import argparse
 import ctypes as ct
 import re
@@ -41,9 +43,15 @@ parser.add_argument("-t", "--timestamp", action="store_true",
 parser.add_argument("-x", "--fails", action="store_true",
     help="include failed exec()s")
 parser.add_argument("-n", "--name",
+    type=ArgString,
     help="only print commands matching this name (regex), any arg")
 parser.add_argument("-l", "--line",
+    type=ArgString,
     help="only print commands where arg contains this line (regex)")
+parser.add_argument("--max-args", default="20",
+    help="maximum number of arguments parsed and displayed, defaults to 20")
+parser.add_argument("--ebpf", action="store_true",
+    help=argparse.SUPPRESS)
 args = parser.parse_args()
 
 # define BPF program
@@ -52,7 +60,6 @@ bpf_text = """
 #include <linux/sched.h>
 #include <linux/fs.h>
 
-#define MAXARG   20
 #define ARGSIZE  128
 
 enum event_type {
@@ -87,7 +94,8 @@ static int submit_arg(struct pt_regs *ctx, void *ptr, struct data_t *data)
     return 0;
 }
 
-int kprobe__sys_execve(struct pt_regs *ctx, struct filename *filename,
+int kprobe__sys_execve(struct pt_regs *ctx,
+    const char __user *filename,
     const char __user *const __user *__argv,
     const char __user *const __user *__envp)
 {
@@ -99,28 +107,12 @@ int kprobe__sys_execve(struct pt_regs *ctx, struct filename *filename,
 
     __submit_arg(ctx, (void *)filename, &data);
 
-    int i = 1;  // skip first arg, as we submitted filename
-
-    // unrolled loop to walk argv[] (MAXARG)
-    if (submit_arg(ctx, (void *)&__argv[i], &data) == 0) goto out; i++;
-    if (submit_arg(ctx, (void *)&__argv[i], &data) == 0) goto out; i++;
-    if (submit_arg(ctx, (void *)&__argv[i], &data) == 0) goto out; i++;
-    if (submit_arg(ctx, (void *)&__argv[i], &data) == 0) goto out; i++;
-    if (submit_arg(ctx, (void *)&__argv[i], &data) == 0) goto out; i++;
-    if (submit_arg(ctx, (void *)&__argv[i], &data) == 0) goto out; i++;
-    if (submit_arg(ctx, (void *)&__argv[i], &data) == 0) goto out; i++;
-    if (submit_arg(ctx, (void *)&__argv[i], &data) == 0) goto out; i++;
-    if (submit_arg(ctx, (void *)&__argv[i], &data) == 0) goto out; i++; // X
-    if (submit_arg(ctx, (void *)&__argv[i], &data) == 0) goto out; i++;
-    if (submit_arg(ctx, (void *)&__argv[i], &data) == 0) goto out; i++;
-    if (submit_arg(ctx, (void *)&__argv[i], &data) == 0) goto out; i++;
-    if (submit_arg(ctx, (void *)&__argv[i], &data) == 0) goto out; i++;
-    if (submit_arg(ctx, (void *)&__argv[i], &data) == 0) goto out; i++;
-    if (submit_arg(ctx, (void *)&__argv[i], &data) == 0) goto out; i++;
-    if (submit_arg(ctx, (void *)&__argv[i], &data) == 0) goto out; i++;
-    if (submit_arg(ctx, (void *)&__argv[i], &data) == 0) goto out; i++;
-    if (submit_arg(ctx, (void *)&__argv[i], &data) == 0) goto out; i++;
-    if (submit_arg(ctx, (void *)&__argv[i], &data) == 0) goto out; i++; // XX
+    // skip first arg, as we submitted filename
+    #pragma unroll
+    for (int i = 1; i < MAXARG; i++) {
+        if (submit_arg(ctx, (void *)&__argv[i], &data) == 0)
+             goto out;
+    }
 
     // handle truncated argument list
     char ellipsis[] = "...";
@@ -141,6 +133,11 @@ int kretprobe__sys_execve(struct pt_regs *ctx)
     return 0;
 }
 """
+
+bpf_text = bpf_text.replace("MAXARG", args.max_args)
+if args.ebpf:
+    print(bpf_text)
+    exit()
 
 # initialize BPF
 b = BPF(text=bpf_text)
@@ -191,21 +188,21 @@ def print_event(cpu, data, size):
     if event.type == EventType.EVENT_ARG:
         argv[event.pid].append(event.argv)
     elif event.type == EventType.EVENT_RET:
-        if args.fails and event.retval == 0:
+        if event.retval != 0 and not args.fails:
             skip = True
-        if args.name and not re.search(args.name, event.comm):
+        if args.name and not re.search(bytes(args.name), event.comm):
             skip = True
-        if args.line and not re.search(args.line,
-                                       b' '.join(argv[event.pid]).decode()):
+        if args.line and not re.search(bytes(args.line),
+                                       b' '.join(argv[event.pid])):
             skip = True
 
         if not skip:
             if args.timestamp:
                 print("%-8.3f" % (time.time() - start_ts), end="")
             ppid = get_ppid(event.pid)
-            print("%-16s %-6s %-6s %3s %s" % (event.comm.decode(), event.pid,
-                    ppid if ppid > 0 else "?", event.retval,
-                    b' '.join(argv[event.pid]).decode()))
+            ppid = b"%d" % ppid if ppid > 0 else b"?"
+            printb(b"%-16s %-6d %-6s %3d %s" % (event.comm, event.pid,
+                   ppid, event.retval, b' '.join(argv[event.pid])))
         try:
             del(argv[event.pid])
         except Exception:

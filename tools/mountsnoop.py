@@ -104,10 +104,9 @@ int kprobe__sys_mount(struct pt_regs *ctx, char __user *source,
     bpf_get_current_comm(event.enter.comm, sizeof(event.enter.comm));
     event.enter.flags = flags;
     task = (struct task_struct *)bpf_get_current_task();
-    bpf_probe_read(&nsproxy, sizeof(nsproxy), &task->nsproxy);
-    bpf_probe_read(&mnt_ns, sizeof(mnt_ns), &nsproxy->mnt_ns);
-    bpf_probe_read(&event.enter.mnt_ns, sizeof(event.enter.mnt_ns),
-               &mnt_ns->ns.inum);
+    nsproxy = task->nsproxy;
+    mnt_ns = nsproxy->mnt_ns;
+    event.enter.mnt_ns = mnt_ns->ns.inum;
     events.perf_submit(ctx, &event, sizeof(event));
 
     event.type = EVENT_MOUNT_SOURCE;
@@ -160,10 +159,9 @@ int kprobe__sys_umount(struct pt_regs *ctx, char __user *target, int flags)
     bpf_get_current_comm(event.enter.comm, sizeof(event.enter.comm));
     event.enter.flags = flags;
     task = (struct task_struct *)bpf_get_current_task();
-    bpf_probe_read(&nsproxy, sizeof(nsproxy), &task->nsproxy);
-    bpf_probe_read(&mnt_ns, sizeof(mnt_ns), &nsproxy->mnt_ns);
-    bpf_probe_read(&event.enter.mnt_ns, sizeof(event.enter.mnt_ns),
-               &mnt_ns->ns.inum);
+    nsproxy = task->nsproxy;
+    mnt_ns = nsproxy->mnt_ns;
+    event.enter.mnt_ns = mnt_ns->ns.inum;
     events.perf_submit(ctx, &event, sizeof(event));
 
     event.type = EVENT_UMOUNT_TARGET;
@@ -395,10 +393,15 @@ def main():
     parser = argparse.ArgumentParser(
         description='trace mount() and umount() syscalls'
     )
+    parser.add_argument("--ebpf", action="store_true",
+        help=argparse.SUPPRESS)
     args = parser.parse_args()
 
     mounts = {}
     umounts = {}
+    if args.ebpf:
+        print(bpf_text)
+        exit()
     b = bcc.BPF(text=bpf_text)
     b['events'].open_perf_buffer(
         functools.partial(print_event, mounts, umounts))

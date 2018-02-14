@@ -51,6 +51,8 @@ parser.add_argument("-p", "--pid",
     help="trace this PID only")
 parser.add_argument("min_ms", nargs="?", default='10',
     help="minimum I/O duration to trace, in ms (default 10)")
+parser.add_argument("--ebpf", action="store_true",
+    help=argparse.SUPPRESS)
 args = parser.parse_args()
 min_ms = int(args.min_ms)
 pid = args.pid
@@ -268,6 +270,7 @@ with open(kallsyms) as syms:
             break
     if ops == '':
         print("ERROR: no btrfs_file_operations in /proc/kallsyms. Exiting.")
+        print("HINT: the kernel should be built with CONFIG_KALLSYMS_ALL.")
         exit()
     bpf_text = bpf_text.replace('BTRFS_FILE_OPERATIONS', ops)
 if min_ms == 0:
@@ -279,8 +282,10 @@ if args.pid:
     bpf_text = bpf_text.replace('FILTER_PID', 'pid != %s' % pid)
 else:
     bpf_text = bpf_text.replace('FILTER_PID', '0')
-if debug:
+if debug or args.ebpf:
     print(bpf_text)
+    if args.ebpf:
+        exit()
 
 # kernel->user event data: struct data_t
 DNAME_INLINE_LEN = 32   # linux/dcache.h

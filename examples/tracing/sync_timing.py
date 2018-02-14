@@ -14,11 +14,10 @@ from bcc import BPF
 # load BPF program
 b = BPF(text="""
 #include <uapi/linux/ptrace.h>
-#include <linux/blkdev.h>
 
 BPF_HASH(last);
 
-void do_trace(struct pt_regs *ctx) {
+int do_trace(struct pt_regs *ctx) {
     u64 ts, *tsp, delta, key = 0;
 
     // attempt to read stored timestamp
@@ -35,6 +34,7 @@ void do_trace(struct pt_regs *ctx) {
     // update stored timestamp
     ts = bpf_ktime_get_ns();
     last.update(&key, &ts);
+    return 0;
 }
 """)
 

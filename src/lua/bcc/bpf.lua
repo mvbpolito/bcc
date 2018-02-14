@@ -156,10 +156,12 @@ function Bpf:load_func(fn_name, prog_type)
     "unknown program: "..fn_name)
 
   local fd = libbcc.bpf_prog_load(prog_type,
+    fn_name,
     libbcc.bpf_function_start(self.module, fn_name),
     libbcc.bpf_function_size(self.module, fn_name),
     libbcc.bpf_module_license(self.module),
-    libbcc.bpf_module_kern_version(self.module), nil, 0)
+    libbcc.bpf_module_kern_version(self.module),
+    0, nil, 0)
 
   assert(fd >= 0, "failed to load BPF program "..fn_name)
   log.info("loaded %s (%d)", fn_name, fd)
@@ -187,9 +189,7 @@ function Bpf:attach_uprobe(args)
   local retprobe = args.retprobe and 1 or 0
 
   local res = libbcc.bpf_attach_uprobe(fn.fd, retprobe, ev_name, path, addr,
-    args.pid or -1,
-    args.cpu or 0,
-    args.group_fd or -1, nil, nil) -- TODO; reader callback
+    args.pid or -1, nil, nil) -- TODO; reader callback
 
   assert(res ~= nil, "failed to attach BPF to uprobe")
   self:probe_store("uprobe", ev_name, res)
@@ -207,9 +207,7 @@ function Bpf:attach_kprobe(args)
   local retprobe = args.retprobe and 1 or 0
 
   local res = libbcc.bpf_attach_kprobe(fn.fd, retprobe, ev_name, event,
-    args.pid or -1,
-    args.cpu or 0,
-    args.group_fd or -1, nil, nil) -- TODO; reader callback
+    nil, nil) -- TODO; reader callback
 
   assert(res ~= nil, "failed to attach BPF to kprobe")
   self:probe_store("kprobe", ev_name, res)
