@@ -67,6 +67,35 @@ TEST_CASE("test bpf table", "[bpf_table]") {
   REQUIRE(res.code() != 0);
 }
 
+TEST_CASE("test bpf percpu tables", "[bpf_percpu_table]") {
+  const std::string BPF_PROGRAM = R"(
+    BPF_TABLE("percpu_hash", int, u64, myhash, 128);
+  )";
+
+  ebpf::BPF *bpf(new ebpf::BPF);
+  ebpf::StatusTuple res(0);
+  res = bpf->init(BPF_PROGRAM);
+  REQUIRE(res.code() == 0);
+
+  ebpf::BPFTable t = bpf->get_table("myhash");
+  size_t ncpus = ebpf::get_possible_cpus().size();
+
+  std::vector<std::string> v1(ncpus);
+  for (size_t i = 0; i < ncpus; i++) {
+    v1.at(i) = std::to_string(42 * i);
+  }
+
+  // update element
+  std::vector<std::string> value;
+  res = t.update_value("0x07", v1);
+  REQUIRE(res.code() == 0);
+  res = t.get_value("0x07", value);
+  REQUIRE(res.code() == 0);
+  for (size_t i = 0; i < ncpus; i++) {
+    REQUIRE(42 * i == std::stoul(value.at(i), nullptr, 16));
+  }
+}
+
 TEST_CASE("test bpf hash table", "[bpf_hash_table]") {
   const std::string BPF_PROGRAM = R"(
     BPF_HASH(myhash, int, int, 128);
