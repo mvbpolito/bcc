@@ -21,13 +21,16 @@
 #include <random>
 #include <iostream>
 
+#include <linux/version.h>
+
 TEST_CASE("test array table", "[array_table]") {
   const std::string BPF_PROGRAM = R"(
     BPF_TABLE("hash", int, int, myhash, 128);
     BPF_TABLE("array", int, int, myarray, 128);
   )";
 
-  ebpf::BPF bpf;
+  // turn off the rw_engine
+  ebpf::BPF bpf(0, nullptr, false);
   ebpf::StatusTuple res(0);
   res = bpf.init(BPF_PROGRAM);
   REQUIRE(res.code() == 0);
@@ -92,6 +95,7 @@ TEST_CASE("test array table", "[array_table]") {
   }
 }
 
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 6, 0)
 TEST_CASE("percpu array table", "[percpu_array_table]") {
   const std::string BPF_PROGRAM = R"(
     BPF_TABLE("percpu_hash", int, u64, myhash, 128);
@@ -141,3 +145,4 @@ TEST_CASE("percpu array table", "[percpu_array_table]") {
     REQUIRE(res.code() != 0);
   }
 }
+#endif

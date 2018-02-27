@@ -68,28 +68,24 @@ class BPFTableBase {
  protected:
   explicit BPFTableBase(const TableDesc& desc) : desc(desc) {}
 
-  bool lookup(KeyType* key, ValueType* value) {
-    return bpf_lookup_elem(desc.fd, static_cast<void*>(key),
-                           static_cast<void*>(value)) >= 0;
+  bool lookup(void* key, void* value) {
+    return bpf_lookup_elem(desc.fd, key, value) >= 0;
   }
 
-  bool first(KeyType* key) {
-    return bpf_get_first_key(desc.fd, static_cast<void*>(key),
-                             desc.key_size) >= 0;
+  bool first(void* key) {
+    return bpf_get_first_key(desc.fd, key, desc.key_size) >= 0;
   }
 
-  bool next(KeyType* key, KeyType* next_key) {
-    return bpf_get_next_key(desc.fd, static_cast<void*>(key),
-                            static_cast<void*>(next_key)) >= 0;
+  bool next(void* key, void* next_key) {
+    return bpf_get_next_key(desc.fd, key, next_key) >= 0;
   }
 
-  bool update(KeyType* key, ValueType* value) {
-    return bpf_update_elem(desc.fd, static_cast<void*>(key),
-                           static_cast<void*>(value), 0) >= 0;
+  bool update(void* key, void* value) {
+    return bpf_update_elem(desc.fd, key, value, 0) >= 0;
   }
 
-  bool remove(KeyType* key) {
-    return bpf_delete_elem(desc.fd, static_cast<void*>(key)) >= 0;
+  bool remove(void* key) {
+    return bpf_delete_elem(desc.fd, key) >= 0;
   }
 
   const TableDesc& desc;
@@ -114,6 +110,12 @@ class BPFTable : public BPFTableBase<void, void> {
 };
 
 template <class ValueType>
+void * get_value_addr(ValueType& t) { return &t; }
+
+template <class ValueType>
+void * get_value_addr(std::vector<ValueType>& t) { return t.data(); }
+
+template <class ValueType>
 class BPFArrayTable : public BPFTableBase<int, ValueType> {
 public:
   BPFArrayTable(const TableDesc& desc)
@@ -125,14 +127,14 @@ public:
     fd_ = desc.fd;
   }
 
-  StatusTuple get_value(const int& index, ValueType& value) {
-    if (!this->lookup(const_cast<int*>(&index), &value))
+  virtual StatusTuple get_value(const int& index, ValueType& value) {
+    if (!this->lookup(const_cast<int*>(&index), get_value_addr(value)))
       return StatusTuple(-1, "Error getting value: %s", std::strerror(errno));
     return StatusTuple(0);
   }
 
-  StatusTuple update_value(const int& index, const ValueType& value) {
-    if (!this->update(const_cast<int*>(&index), const_cast<ValueType*>(&value)))
+  virtual StatusTuple update_value(const int& index, const ValueType& value) {
+    if (!this->update(const_cast<int*>(&index), get_value_addr(const_cast<ValueType&>(value))))
       return StatusTuple(-1, "Error updating value: %s", std::strerror(errno));
     return StatusTuple(0);
   }
@@ -162,49 +164,30 @@ private:
 };
 
 template <class ValueType>
-class BPFPercpuArrayTable : public BPFTableBase<int, ValueType> {
-public:
+class BPFPercpuArrayTable : public BPFArrayTable<std::vector<ValueType>> {
+ public:
   BPFPercpuArrayTable(const TableDesc& desc)
-      : BPFTableBase<int, ValueType>(desc) {
+      : BPFArrayTable<std::vector<ValueType>>(desc),
+      ncpus(get_possible_cpus().size()) {
     if (desc.type != BPF_MAP_TYPE_PERCPU_ARRAY)
       throw std::invalid_argument("Table '" + desc.name + "' is not a percpu array table");
-    // leaf structures has to be aligned to 8 bytes as hardcoded in the linux kernel.
+    // leaf structures have to be aligned to 8 bytes as hardcoded in the linux kernel.
     if (sizeof(ValueType) % 8)
       throw std::invalid_argument("leaf must be aligned to 8 bytes");
   }
 
   StatusTuple get_value(const int& index, std::vector<ValueType>& value) {
-    size_t ncpus = get_possible_cpus().size();
     value.resize(ncpus);
-    if (!this->lookup(const_cast<int*>(&index), static_cast<ValueType*>(value.data())))
-      return StatusTuple(-1, "Error getting value: %s", std::strerror(errno));
-    return StatusTuple(0);
+    return BPFArrayTable<std::vector<ValueType>>::get_value(index, value);
   }
 
   StatusTuple update_value(const int& index, const std::vector<ValueType>& value) {
-    size_t ncpus = get_possible_cpus().size();
     if (value.size() != ncpus)
       return StatusTuple(-1, "bad value size");
-    if (!this->update(const_cast<int*>(&index), const_cast<ValueType*>(value.data())))
-      return StatusTuple(-1, "Error updating value: %s", std::strerror(errno));
-    return StatusTuple(0);
+    return BPFArrayTable<std::vector<ValueType>>::update_value(index, value);
   }
-
-  std::vector<ValueType> operator[](const int& key) {
-    std::vector<ValueType> value;
-    get_value(key, value);
-    return value;
-  }
-
-  std::vector<std::vector<ValueType>> get_table_offline() {
-    std::vector<std::vector<ValueType>> res(this->capacity());
-
-    for (int i = 0; i < (int) this->capacity(); i++) {
-      get_value(i, res[i]);
-    }
-
-    return res;
-  }
+ private:
+  unsigned int ncpus;
 };
 
 template <class KeyType, class ValueType>
@@ -221,19 +204,19 @@ class BPFHashTable : public BPFTableBase<KeyType, ValueType> {
     fd_ = desc.fd;
   }
 
-  StatusTuple get_value(const KeyType& key, ValueType& value) {
-    if (!this->lookup(const_cast<KeyType*>(&key), &value))
+  virtual StatusTuple get_value(const KeyType& key, ValueType& value) {
+    if (!this->lookup(const_cast<KeyType*>(&key), get_value_addr(value)))
       return StatusTuple(-1, "Error getting value: %s", std::strerror(errno));
     return StatusTuple(0);
   }
 
-  StatusTuple update_value(const KeyType& key, const ValueType& value) {
-    if (!this->update(const_cast<KeyType*>(&key), const_cast<ValueType*>(&value)))
+  virtual StatusTuple update_value(const KeyType& key, const ValueType& value) {
+    if (!this->update(const_cast<KeyType*>(&key), get_value_addr(const_cast<ValueType&>(value))))
       return StatusTuple(-1, "Error updating value: %s", std::strerror(errno));
     return StatusTuple(0);
   }
 
-  StatusTuple remove_value(const KeyType& key) {
+  virtual StatusTuple remove_value(const KeyType& key) {
     if (!this->remove(const_cast<KeyType*>(&key)))
       return StatusTuple(-1, "Error removing value: %s", std::strerror(errno));
     return StatusTuple(0);
@@ -287,80 +270,31 @@ private:
 };
 
 template <class KeyType, class ValueType>
-class BPFPercpuHashTable : public BPFTableBase<KeyType, ValueType> {
+class BPFPercpuHashTable : public BPFHashTable<KeyType, std::vector<ValueType>> {
  public:
   explicit BPFPercpuHashTable(const TableDesc& desc)
-      : BPFTableBase<KeyType, ValueType>(desc) {
+      : BPFHashTable<KeyType, std::vector<ValueType>>(desc),
+      ncpus(get_possible_cpus().size()) {
     if (desc.type != BPF_MAP_TYPE_PERCPU_HASH &&
         desc.type != BPF_MAP_TYPE_LRU_PERCPU_HASH)
       throw std::invalid_argument("Table '" + desc.name + "' is not a percpu hash table");
-    // leaf structures has to be aligned to 8 bytes as hardcoded in the linux kernel.
+    // leaf structures have to be aligned to 8 bytes as hardcoded in the linux kernel.
     if (sizeof(ValueType) % 8)
       throw std::invalid_argument("leaf must be aligned to 8 bytes");
   }
 
   StatusTuple get_value(const KeyType& key, std::vector<ValueType>& value) {
-    size_t ncpus = get_possible_cpus().size();
     value.resize(ncpus);
-    if (!this->lookup(const_cast<KeyType*>(&key), static_cast<ValueType*>(value.data())))
-      return StatusTuple(-1, "Error getting value: %s", std::strerror(errno));
-    return StatusTuple(0);
+    return BPFHashTable<KeyType, std::vector<ValueType>>::get_value(key, value);
   }
 
   StatusTuple update_value(const KeyType& key, const std::vector<ValueType>& value) {
-    size_t ncpus = get_possible_cpus().size();
     if (value.size() != ncpus)
       return StatusTuple(-1, "bad value size");
-    if (!this->update(const_cast<KeyType*>(&key), const_cast<ValueType*>(value.data())))
-      return StatusTuple(-1, "Error updating value: %s", std::strerror(errno));
-    return StatusTuple(0);
+    return BPFHashTable<KeyType, std::vector<ValueType>>::update_value(key, value);
   }
-
-  StatusTuple remove_value(const KeyType& key) {
-    if (!this->remove(const_cast<KeyType*>(&key)))
-      return StatusTuple(-1, "Error removing value: %s", std::strerror(errno));
-    return StatusTuple(0);
-  }
-
-  std::vector<ValueType> operator[](const KeyType& key) {
-    std::vector<ValueType> value;
-    get_value(key, value);
-    return value;
-  }
-
-  std::vector<std::pair<KeyType, std::vector<ValueType>>> get_table_offline() {
-    std::vector<std::pair<KeyType, std::vector<ValueType>>> res;
-    KeyType cur;
-    size_t ncpus = get_possible_cpus().size();
-    std::vector<ValueType> value(ncpus);
-
-    if (!this->first(&cur))
-      return res;
-
-    while (true) {
-      if (!this->lookup(&cur, value.data()))
-        break;
-      res.emplace_back(cur, value);
-      if (!this->next(&cur, &cur))
-        break;
-    }
-
-    return res;
-  }
-
-  StatusTuple clear_table_non_atomic() {
-    KeyType cur;
-    if (!this->first(&cur))
-      return StatusTuple(0);
-
-    while (true) {
-      TRY2(remove_value(cur));
-      if (!this->next(&cur, &cur))
-        break;
-    }
-
-    return StatusTuple(0);
-  }
+ private:
+  unsigned int ncpus;
 };
 
 // From src/cc/export/helpers.h

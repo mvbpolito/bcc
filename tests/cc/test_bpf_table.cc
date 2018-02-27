@@ -67,17 +67,18 @@ TEST_CASE("test bpf table", "[bpf_table]") {
   REQUIRE(res.code() != 0);
 }
 
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 6, 0)
 TEST_CASE("test bpf percpu tables", "[bpf_percpu_table]") {
   const std::string BPF_PROGRAM = R"(
     BPF_TABLE("percpu_hash", int, u64, myhash, 128);
   )";
 
-  ebpf::BPF *bpf(new ebpf::BPF);
+  ebpf::BPF bpf;
   ebpf::StatusTuple res(0);
-  res = bpf->init(BPF_PROGRAM);
+  res = bpf.init(BPF_PROGRAM);
   REQUIRE(res.code() == 0);
 
-  ebpf::BPFTable t = bpf->get_table("myhash");
+  ebpf::BPFTable t = bpf.get_table("myhash");
   size_t ncpus = ebpf::get_possible_cpus().size();
 
   std::vector<std::string> v1(ncpus);
@@ -95,6 +96,7 @@ TEST_CASE("test bpf percpu tables", "[bpf_percpu_table]") {
     REQUIRE(42 * i == std::stoul(value.at(i), nullptr, 16));
   }
 }
+#endif
 
 TEST_CASE("test bpf hash table", "[bpf_hash_table]") {
   const std::string BPF_PROGRAM = R"(

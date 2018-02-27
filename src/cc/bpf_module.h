@@ -75,7 +75,7 @@ class BPFModule {
                        const void *val);
 
  public:
-  BPFModule(unsigned flags, TableStorage *ts = nullptr, const std::string &maps_ns = "", const std::string &other_id = "");
+  BPFModule(unsigned flags, TableStorage *ts = nullptr, bool rw_engine_enabled = true, const std::string &maps_ns = "", const std::string &other_id = "");
   ~BPFModule();
   int load_b(const std::string &filename, const std::string &proto_filename);
   int load_c(const std::string &filename, const char *cflags[], int ncflags);
@@ -122,6 +122,7 @@ class BPFModule {
 
  private:
   unsigned flags_;  // 0x1 for printing
+  bool rw_engine_enabled_;
   bool used_b_loader_;
   std::string filename_;
   std::string proto_filename_;

@@ -15,6 +15,7 @@
  */
 
 #include "BPF.h"
+#include <linux/version.h>
 
 #include "catch.hpp"
 
@@ -86,6 +87,7 @@ TEST_CASE("test hash table", "[hash_table]") {
   }
 }
 
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,6,0)
 TEST_CASE("percpu hash table", "[percpu_hash_table]") {
   const std::string BPF_PROGRAM = R"(
     BPF_TABLE("percpu_hash", int, u64, myhash, 128);
@@ -155,3 +157,4 @@ TEST_CASE("percpu hash table", "[percpu_hash_table]") {
     REQUIRE(res.code() != 0);
   }
 }
+#endif
