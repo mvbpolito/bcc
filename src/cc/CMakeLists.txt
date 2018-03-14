@@ -37,7 +37,7 @@ set(bcc_table_sources table_storage.cc shared_table.cc bpffs_table.cc json_map_d
 set(bcc_util_sources ns_guard.cc common.cc)
 set(bcc_sym_sources bcc_syms.cc bcc_elf.c bcc_perf_map.c bcc_proc.c)
 set(bcc_common_headers libbpf.h perf_reader.h)
-set(bcc_table_headers common.h file_desc.h table_desc.h table_storage.h)
+set(bcc_table_headers file_desc.h table_desc.h table_storage.h)
 set(bcc_api_headers bpf_common.h bpf_module.h bcc_exception.h bcc_syms.h)
 
 if(ENABLE_CLANG_JIT)
@@ -52,6 +52,8 @@ target_link_libraries(bcc-loader-static elf)
 add_library(bcc-static STATIC
   ${bcc_common_sources} ${bcc_table_sources} ${bcc_util_sources})
 set_target_properties(bcc-static PROPERTIES OUTPUT_NAME bcc)
+add_library(bcc-lua-static STATIC
+  ${bcc_common_sources} ${bcc_table_sources} ${bcc_sym_sources} ${bcc_util_sources})
 
 include(clang_libs)
 set(CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS} ${clang_lib_exclude_flags}")
@@ -62,6 +64,7 @@ set(CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS} ${llvm_lib_exclude_f
 set(bcc_common_libs_for_a b_frontend clang_frontend bpf-static
   ${clang_libs} ${llvm_libs} ${LIBELF_LIBRARIES})
 set(bcc_common_libs_for_s ${bcc_common_libs_for_a})
+set(bcc_common_libs_for_lua ${bcc_common_libs_for_a})
 
 if(ENABLE_CPP_API)
   add_subdirectory(api)
@@ -74,6 +77,7 @@ if(ENABLE_USDT)
   add_subdirectory(usdt)
   list(APPEND bcc_common_libs_for_a usdt-static)
   list(APPEND bcc_common_libs_for_s usdt-static)
+  list(APPEND bcc_common_libs_for_lua usdt-static)
 endif()
 
 add_subdirectory(frontends)
@@ -81,6 +85,7 @@ add_subdirectory(frontends)
 # Link against LLVM libraries
 target_link_libraries(bcc-shared ${bcc_common_libs_for_s})
 target_link_libraries(bcc-static ${bcc_common_libs_for_a} bcc-loader-static)
+target_link_libraries(bcc-lua-static ${bcc_common_libs_for_lua})
 
 install(TARGETS bcc-shared LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR})
 install(FILES ${bcc_table_headers} DESTINATION include/bcc)

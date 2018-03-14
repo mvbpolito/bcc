@@ -34,9 +34,9 @@ static const int DEFAULT_PERF_BUFFER_PAGE_CNT = 8;
 namespace ebpf {
 
 struct open_probe_t {
-  void* reader_ptr;
+  int perf_event_fd;
   std::string func;
-  std::map<int, int>* per_cpu_fd;
+  std::vector<std::pair<int, int>>* per_cpu_fd;
 };
 
 class USDT;
@@ -59,9 +59,7 @@ class BPF {
 
   StatusTuple attach_kprobe(const std::string& kernel_func,
                             const std::string& probe_func,
-                            bpf_probe_attach_type = BPF_PROBE_ENTRY,
-                            perf_reader_cb cb = nullptr,
-                            void* cb_cookie = nullptr);
+                            bpf_probe_attach_type = BPF_PROBE_ENTRY);
   StatusTuple detach_kprobe(
       const std::string& kernel_func,
       bpf_probe_attach_type attach_type = BPF_PROBE_ENTRY);
@@ -71,8 +69,7 @@ class BPF {
                             const std::string& probe_func,
                             uint64_t symbol_addr = 0,
                             bpf_probe_attach_type attach_type = BPF_PROBE_ENTRY,
-                            pid_t pid = -1, perf_reader_cb cb = nullptr,
-                            void* cb_cookie = nullptr);
+                            pid_t pid = -1);
   StatusTuple detach_uprobe(const std::string& binary_path,
                             const std::string& symbol, uint64_t symbol_addr = 0,
                             bpf_probe_attach_type attach_type = BPF_PROBE_ENTRY,
@@ -81,9 +78,7 @@ class BPF {
   StatusTuple detach_usdt(const USDT& usdt);
 
   StatusTuple attach_tracepoint(const std::string& tracepoint,
-                                const std::string& probe_func,
-                                perf_reader_cb cb = nullptr,
-                                void* cb_cookie = nullptr);
+                                const std::string& probe_func);
   StatusTuple detach_tracepoint(const std::string& tracepoint);
 
   StatusTuple attach_perf_event(uint32_t ev_type, uint32_t ev_config,
@@ -91,7 +86,12 @@ class BPF {
                                 uint64_t sample_period, uint64_t sample_freq,
                                 pid_t pid = -1, int cpu = -1,
                                 int group_fd = -1);
+  StatusTuple attach_perf_event_raw(void* perf_event_attr,
+                                    const std::string& probe_func,
+                                    pid_t pid = -1, int cpu = -1,
+                                    int group_fd = -1);
   StatusTuple detach_perf_event(uint32_t ev_type, uint32_t ev_config);
+  StatusTuple detach_perf_event_raw(void* perf_event_attr);
 
   BPFTable get_table(const std::string& name) {
     TableStorage::iterator it;
@@ -145,12 +145,21 @@ class BPF {
 
   StatusTuple close_perf_event(const std::string& name);
 
+  // Open a Perf Buffer of given name, providing callback and callback cookie
+  // to use when polling. BPF class owns the opened Perf Buffer and will free
+  // it on-demand or on destruction.
   StatusTuple open_perf_buffer(const std::string& name, perf_reader_raw_cb cb,
                                perf_reader_lost_cb lost_cb = nullptr,
                                void* cb_cookie = nullptr,
                                int page_cnt = DEFAULT_PERF_BUFFER_PAGE_CNT);
+  // Close and free the Perf Buffer of given name.
   StatusTuple close_perf_buffer(const std::string& name);
-  void poll_perf_buffer(const std::string& name, int timeout = -1);
+  // Obtain an pointer to the opened BPFPerfBuffer instance of given name.
+  // Will return nullptr if such open Perf Buffer doesn't exist.
+  BPFPerfBuffer* get_perf_buffer(const std::string& name);
+  // Poll an opened Perf Buffer of given name with given timeout, using callback
+  // provided when opening. Do nothing if such open Perf Buffer doesn't exist.
+  void poll_perf_buffer(const std::string& name, int timeout_ms = -1);
 
   StatusTuple load_func(const std::string& func_name, enum bpf_prog_type type,
                         int& fd);

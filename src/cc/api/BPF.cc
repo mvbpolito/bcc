@@ -15,6 +15,7 @@
  */
 
 #include <linux/bpf.h>
+#include <linux/perf_event.h>
 #include <unistd.h>
 #include <cstdio>
 #include <cstring>
@@ -159,8 +160,7 @@ StatusTuple BPF::detach_all() {
 
 StatusTuple BPF::attach_kprobe(const std::string& kernel_func,
                                const std::string& probe_func,
-                               bpf_probe_attach_type attach_type,
-                               perf_reader_cb cb, void* cb_cookie) {
+                               bpf_probe_attach_type attach_type) {
   std::string probe_event = get_kprobe_event(kernel_func, attach_type);
   if (kprobes_.find(probe_event) != kprobes_.end())
     return StatusTuple(-1, "kprobe %s already attached", probe_event.c_str());
@@ -168,10 +168,10 @@ StatusTuple BPF::attach_kprobe(const std::string& kernel_func,
   int probe_fd;
   TRY2(load_func(probe_func, BPF_PROG_TYPE_KPROBE, probe_fd));
 
-  void* res = bpf_attach_kprobe(probe_fd, attach_type, probe_event.c_str(),
-                                kernel_func.c_str(), cb, cb_cookie);
+  int res_fd = bpf_attach_kprobe(probe_fd, attach_type, probe_event.c_str(),
+                                 kernel_func.c_str());
 
-  if (!res) {
+  if (res_fd < 0) {
     TRY2(unload_func(probe_func));
     return StatusTuple(-1, "Unable to attach %skprobe for %s using %s",
                        attach_type_debug(attach_type).c_str(),
@@ -179,7 +179,7 @@ StatusTuple BPF::attach_kprobe(const std::string& kernel_func,
   }
 
   open_probe_t p = {};
-  p.reader_ptr = res;
+  p.perf_event_fd = res_fd;
   p.func = probe_func;
   kprobes_[probe_event] = std::move(p);
   return StatusTuple(0);
@@ -189,8 +189,7 @@ StatusTuple BPF::attach_uprobe(const std::string& binary_path,
                                const std::string& symbol,
                                const std::string& probe_func,
                                uint64_t symbol_addr,
-                               bpf_probe_attach_type attach_type, pid_t pid,
-                               perf_reader_cb cb, void* cb_cookie) {
+                               bpf_probe_attach_type attach_type, pid_t pid) {
   std::string module;
   uint64_t offset;
   TRY2(check_binary_symbol(binary_path, symbol, symbol_addr, module, offset));
@@ -202,11 +201,10 @@ StatusTuple BPF::attach_uprobe(const std::string& binary_path,
   int probe_fd;
   TRY2(load_func(probe_func, BPF_PROG_TYPE_KPROBE, probe_fd));
 
-  void* res =
-      bpf_attach_uprobe(probe_fd, attach_type, probe_event.c_str(),
-                        binary_path.c_str(), offset, pid, cb, cb_cookie);
+  int res_fd = bpf_attach_uprobe(probe_fd, attach_type, probe_event.c_str(),
+                                 binary_path.c_str(), offset, pid);
 
-  if (!res) {
+  if (res_fd < 0) {
     TRY2(unload_func(probe_func));
     return StatusTuple(
         -1,
@@ -216,7 +214,7 @@ StatusTuple BPF::attach_uprobe(const std::string& binary_path,
   }
 
   open_probe_t p = {};
-  p.reader_ptr = res;
+  p.perf_event_fd = res_fd;
   p.func = probe_func;
   uprobes_[probe_event] = std::move(p);
   return StatusTuple(0);
@@ -253,8 +251,7 @@ StatusTuple BPF::attach_usdt(const USDT& usdt, pid_t pid) {
 }
 
 StatusTuple BPF::attach_tracepoint(const std::string& tracepoint,
-                                   const std::string& probe_func,
-                                   perf_reader_cb cb, void* cb_cookie) {
+                                   const std::string& probe_func) {
   if (tracepoints_.find(tracepoint) != tracepoints_.end())
     return StatusTuple(-1, "Tracepoint %s already attached",
                        tracepoint.c_str());
@@ -268,17 +265,17 @@ StatusTuple BPF::attach_tracepoint(const std::string& tracepoint,
   int probe_fd;
   TRY2(load_func(probe_func, BPF_PROG_TYPE_TRACEPOINT, probe_fd));
 
-  void* res = bpf_attach_tracepoint(probe_fd, tp_category.c_str(),
-                                    tp_name.c_str(), cb, cb_cookie);
+  int res_fd = bpf_attach_tracepoint(probe_fd, tp_category.c_str(),
+                                    tp_name.c_str());
 
-  if (!res) {
+  if (res_fd < 0) {
     TRY2(unload_func(probe_func));
     return StatusTuple(-1, "Unable to attach Tracepoint %s using %s",
                        tracepoint.c_str(), probe_func.c_str());
   }
 
   open_probe_t p = {};
-  p.reader_ptr = res;
+  p.perf_event_fd = res_fd;
   p.func = probe_func;
   tracepoints_[tracepoint] = std::move(p);
   return StatusTuple(0);
@@ -296,12 +293,13 @@ StatusTuple BPF::attach_perf_event(uint32_t ev_type, uint32_t ev_config,
   int probe_fd;
   TRY2(load_func(probe_func, BPF_PROG_TYPE_PERF_EVENT, probe_fd));
 
-  auto fds = new std::map<int, int>();
   std::vector<int> cpus;
   if (cpu >= 0)
     cpus.push_back(cpu);
   else
     cpus = get_online_cpus();
+  auto fds = new std::vector<std::pair<int, int>>();
+  fds->reserve(cpus.size());
   for (int i : cpus) {
     int fd = bpf_attach_perf_event(probe_fd, ev_type, ev_config, sample_period,
                                    sample_freq, pid, i, group_fd);
@@ -313,7 +311,7 @@ StatusTuple BPF::attach_perf_event(uint32_t ev_type, uint32_t ev_config,
       return StatusTuple(-1, "Failed to attach perf event type %d config %d",
                          ev_type, ev_config);
     }
-    fds->emplace(i, fd);
+    fds->emplace_back(i, fd);
   }
 
   open_probe_t p = {};
@@ -321,6 +319,46 @@ StatusTuple BPF::attach_perf_event(uint32_t ev_type, uint32_t ev_config,
   p.per_cpu_fd = fds;
   perf_events_[ev_pair] = std::move(p);
   return StatusTuple(0);
+}
+
+StatusTuple BPF::attach_perf_event_raw(void* perf_event_attr,
+                                       const std::string& probe_func,
+                                       pid_t pid, int cpu, int group_fd) {
+  auto attr = static_cast<struct perf_event_attr*>(perf_event_attr);
+  auto ev_pair = std::make_pair(attr->type, attr->config);
+  if (perf_events_.find(ev_pair) != perf_events_.end())
+    return StatusTuple(-1, "Perf event type %d config %d already attached",
+                       attr->type, attr->config);
+
+  int probe_fd;
+  TRY2(load_func(probe_func, BPF_PROG_TYPE_PERF_EVENT, probe_fd));
+
+  std::vector<int> cpus;
+  if (cpu >= 0)
+    cpus.push_back(cpu);
+  else
+    cpus = get_online_cpus();
+  auto fds = new std::vector<std::pair<int, int>>();
+  fds->reserve(cpus.size());
+  for (int i : cpus) {
+    int fd = bpf_attach_perf_event_raw(probe_fd, attr, pid, i, group_fd);
+    if (fd < 0) {
+      for (const auto& it : *fds)
+        close(it.second);
+      delete fds;
+      TRY2(unload_func(probe_func));
+      return StatusTuple(-1, "Failed to attach perf event type %d config %d",
+                         attr->type, attr->config);
+    }
+    fds->emplace_back(i, fd);
+  }
+
+  open_probe_t p = {};
+  p.func = probe_func;
+  p.per_cpu_fd = fds;
+  perf_events_[ev_pair] = std::move(p);
+  return StatusTuple(0);
+
 }
 
 StatusTuple BPF::detach_kprobe(const std::string& kernel_func,
@@ -398,6 +436,11 @@ StatusTuple BPF::detach_perf_event(uint32_t ev_type, uint32_t ev_config) {
   return StatusTuple(0);
 }
 
+StatusTuple BPF::detach_perf_event_raw(void* perf_event_attr) {
+  auto attr = static_cast<struct perf_event_attr*>(perf_event_attr);
+  return detach_perf_event(attr->type, attr->config);
+}
+
 StatusTuple BPF::open_perf_event(const std::string& name, uint32_t type,
                                  uint64_t config) {
   if (perf_event_arrays_.find(name) == perf_event_arrays_.end()) {
@@ -447,11 +490,16 @@ StatusTuple BPF::close_perf_buffer(const std::string& name) {
   return StatusTuple(0);
 }
 
-void BPF::poll_perf_buffer(const std::string& name, int timeout) {
+BPFPerfBuffer* BPF::get_perf_buffer(const std::string& name) {
+  auto it = perf_buffers_.find(name);
+  return (it == perf_buffers_.end()) ? nullptr : it->second;
+}
+
+void BPF::poll_perf_buffer(const std::string& name, int timeout_ms) {
   auto it = perf_buffers_.find(name);
   if (it == perf_buffers_.end())
     return;
-  it->second->poll(timeout);
+  it->second->poll(timeout_ms);
 }
 
 StatusTuple BPF::load_func(const std::string& func_name, bpf_prog_type type,
@@ -565,10 +613,7 @@ std::string BPF::get_uprobe_event(const std::string& binary_path,
 
 StatusTuple BPF::detach_kprobe_event(const std::string& event,
                                      open_probe_t& attr) {
-  if (attr.reader_ptr) {
-    perf_reader_free(attr.reader_ptr);
-    attr.reader_ptr = nullptr;
-  }
+  bpf_close_perf_event_fd(attr.perf_event_fd);
   TRY2(unload_func(attr.func));
   if (bpf_detach_kprobe(event.c_str()) < 0)
     return StatusTuple(-1, "Unable to detach kprobe %s", event.c_str());
@@ -577,10 +622,7 @@ StatusTuple BPF::detach_kprobe_event(const std::string& event,
 
 StatusTuple BPF::detach_uprobe_event(const std::string& event,
                                      open_probe_t& attr) {
-  if (attr.reader_ptr) {
-    perf_reader_free(attr.reader_ptr);
-    attr.reader_ptr = nullptr;
-  }
+  bpf_close_perf_event_fd(attr.perf_event_fd);
   TRY2(unload_func(attr.func));
   if (bpf_detach_uprobe(event.c_str()) < 0)
     return StatusTuple(-1, "Unable to detach uprobe %s", event.c_str());
@@ -589,10 +631,7 @@ StatusTuple BPF::detach_uprobe_event(const std::string& event,
 
 StatusTuple BPF::detach_tracepoint_event(const std::string& tracepoint,
                                          open_probe_t& attr) {
-  if (attr.reader_ptr) {
-    perf_reader_free(attr.reader_ptr);
-    attr.reader_ptr = nullptr;
-  }
+  bpf_close_perf_event_fd(attr.perf_event_fd);
   TRY2(unload_func(attr.func));
 
   // TODO: bpf_detach_tracepoint currently does nothing.

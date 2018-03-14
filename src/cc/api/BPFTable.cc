@@ -187,6 +187,10 @@ StatusTuple BPFTable::get_table_offline(
   return StatusTuple(0);
 }
 
+size_t BPFTable::get_possible_cpu_count() {
+  return get_possible_cpus().size();
+}
+
 BPFStackTable::BPFStackTable(const TableDesc& desc,
                              bool use_debug_file,
                              bool check_debug_file_crc)
@@ -336,10 +340,10 @@ StatusTuple BPFPerfBuffer::close_all_cpu() {
   return StatusTuple(0);
 }
 
-void BPFPerfBuffer::poll(int timeout) {
+void BPFPerfBuffer::poll(int timeout_ms) {
   if (epfd_ < 0)
     return;
-  int cnt = epoll_wait(epfd_, ep_events_.get(), cpu_readers_.size(), timeout);
+  int cnt = epoll_wait(epfd_, ep_events_.get(), cpu_readers_.size(), timeout_ms);
   if (cnt <= 0)
     return;
   for (int i = 0; i < cnt; i++)
