@@ -21,6 +21,8 @@
 #include <cstring>
 #include <exception>
 #include <iostream>
+#include <fstream>
+#include <string>
 #include <memory>
 #include <sstream>
 #include <utility>
@@ -514,6 +516,21 @@ StatusTuple BPF::load_func(const std::string& func_name, bpf_prog_type type,
     return StatusTuple(-1, "Can't find start of function %s",
                        func_name.c_str());
   size_t func_size = bpf_module_->function_size(func_name);
+
+  /*
+  const char* func_rx_start = bpf_module_->function_source_rewritten("handle_rx_wrapper");
+  if (!func_start)
+    return StatusTuple(-1, "Can't find start of function %s",
+                       func_name.c_str());
+  size_t func_rx_size = bpf_module_->function_size("handle_rx_wrapper");
+
+  std::string new_func_rx_start(func_rx_start);
+  std::ofstream out_file("/home/iovnets/bcc_file.c");
+  out_file << new_func_rx_start << '\n';
+  out_file << bpf_module_->num_functions() << '\n';
+  out_file << bpf_module_->num_tables();
+  out_file.close();
+  */
 
   int log_level = 0;
   if (flag_ & DEBUG_BPF_REGISTER_STATE)

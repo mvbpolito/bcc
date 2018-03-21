@@ -31,6 +31,9 @@
 #include <vector>
 #include <iostream>
 #include <linux/bpf.h>
+#include <fstream>
+#include <iostream>
+#include <chrono>
 
 #include <clang/Basic/FileManager.h>
 #include <clang/Basic/TargetInfo.h>
@@ -107,7 +110,9 @@ int ClangLoader::parse(unique_ptr<llvm::Module> *mod, TableStorage &ts,
                        int ncflags, const std::string &id, FuncSource &func_src,
                        std::string &mod_src, const std::string &maps_ns, const std::string &other_id) {
   using namespace clang;
-  
+
+  auto start_parse = std::chrono::steady_clock::now();
+
   string main_path = "/virtual/main.c";
   unique_ptr<llvm::MemoryBuffer> main_buf;
   struct utsname un;
@@ -159,7 +164,13 @@ int ClangLoader::parse(unique_ptr<llvm::Module> *mod, TableStorage &ts,
                                    "-fno-unwind-tables",
                                    "-fno-asynchronous-unwind-tables",
                                    "-x", "c", "-c", abs_file.c_str()});
-
+  /*
+  std::ofstream out_file("/home/iovnets/bcc_file.c");
+  out_file << abs_file << '\n';
+  out_file << "Main Path: " << main_path << '\n';
+  out_file << "Mod Source: " << mod_src << '\n';
+  out_file.close();
+  */
   KBuildHelper kbuild_helper(kpath_env ? kpath : kdir, has_kpath_source);
 
   vector<string> kflags;
@@ -184,6 +195,8 @@ int ClangLoader::parse(unique_ptr<llvm::Module> *mod, TableStorage &ts,
   flags_cstr_rem.push_back(cur_cpu_flag.c_str());
 #endif
 
+  auto end_parse = std::chrono::steady_clock::now();
+  auto start_compile = std::chrono::steady_clock::now();
   if (do_compile(mod, ts, in_memory, flags_cstr, flags_cstr_rem, main_path,
                  main_buf, id, func_src, mod_src, true, maps_ns, other_id)) {
 #if BCC_BACKUP_COMPILE != 1
@@ -200,6 +213,15 @@ int ClangLoader::parse(unique_ptr<llvm::Module> *mod, TableStorage &ts,
       return -1;
 #endif
   }
+
+  auto end_compile = std::chrono::steady_clock::now();
+  auto diff_parse = end_parse - start_parse;
+  auto diff_compile = end_compile - start_compile;
+  std::ofstream out_file("/home/iovnets/bcc_file.c");
+  out_file << "Parse time: " << std::chrono::duration <double, std::milli> (diff_parse).count() << " ms \n";
+  out_file << "Compilation time: " << std::chrono::duration <double, std::milli> (diff_compile).count() << " ms \n";
+  out_file << "Mod Source: " << mod_src << '\n';
+  out_file.close();
 
   return 0;
 }
@@ -298,7 +320,7 @@ int ClangLoader::do_compile(unique_ptr<llvm::Module> *mod, TableStorage &ts,
       llvm::errs() << " " << arg;
     llvm::errs() << "\n";
   }
-
+  auto start0 = std::chrono::steady_clock::now();
   // pre-compilation pass for generating tracepoint structures
   CompilerInstance compiler0;
   CompilerInvocation &invocation0 = compiler0.getInvocation();
@@ -327,7 +349,8 @@ int ClangLoader::do_compile(unique_ptr<llvm::Module> *mod, TableStorage &ts,
   TracepointFrontendAction tpact(os);
   compiler0.ExecuteAction(tpact); // ignore errors, they will be reported later
   unique_ptr<llvm::MemoryBuffer> out_buf = llvm::MemoryBuffer::getMemBuffer(out_str);
-
+  auto end0 = std::chrono::steady_clock::now();
+  auto start1 = std::chrono::steady_clock::now();
   // first pass
   CompilerInstance compiler1;
   CompilerInvocation &invocation1 = compiler1.getInvocation();
@@ -357,7 +380,9 @@ int ClangLoader::do_compile(unique_ptr<llvm::Module> *mod, TableStorage &ts,
   if (!compiler1.ExecuteAction(bact))
     return -1;
   unique_ptr<llvm::MemoryBuffer> out_buf1 = llvm::MemoryBuffer::getMemBuffer(out_str1);
+  auto end1 = std::chrono::steady_clock::now();
 
+  auto start2 = std::chrono::steady_clock::now();
   // second pass, clear input and take rewrite buffer
   CompilerInstance compiler2;
   CompilerInvocation &invocation2 = compiler2.getInvocation();
@@ -385,6 +410,22 @@ int ClangLoader::do_compile(unique_ptr<llvm::Module> *mod, TableStorage &ts,
   if (!compiler2.ExecuteAction(ir_act))
     return -1;
   *mod = ir_act.takeModule();
+
+  auto end2 = std::chrono::steady_clock::now();
+
+  std::ofstream out_file("/home/iovnets/bcc_file_compile.c");
+  out_file << "out_str: " << out_str << '\n';
+  out_file << "out_str1: " << out_str1 << '\n';
+  out_file.close();
+
+  auto diff0 = end0 - start0;
+  auto diff1 = end1 - start1;
+  auto diff2 = end2 - start2;
+  std::ofstream out_file1("/home/iovnets/bcc_file_compile_time.txt");
+  out_file1 << "phase 0: " << std::chrono::duration <double, std::milli> (diff0).count() << " ms \n";
+  out_file1 << "phase 1: " << std::chrono::duration <double, std::milli> (diff1).count() << " ms \n";
+  out_file1 << "phase 2: " << std::chrono::duration <double, std::milli> (diff2).count() << " ms \n";
+  out_file1.close();
 
   return 0;
 }
