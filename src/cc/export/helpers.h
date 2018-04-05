@@ -17,8 +17,8 @@ R"********(
 #ifndef __BPF_HELPERS_H
 #define __BPF_HELPERS_H
 
-#include <uapi/linux/bpf.h>
-#include <uapi/linux/if_packet.h>
+//#include <uapi/linux/bpf.h>
+//#include <uapi/linux/if_packet.h>
 #include <linux/version.h>
 
 #ifndef CONFIG_BPF_SYSCALL
@@ -158,19 +158,6 @@ struct _name##_table_t _name = { .max_entries = (_max_entries) }
     __VA_ARGS__, BPF_PERCPU_ARRAY3, BPF_PERCPU_ARRAY2, BPF_PERCPU_ARRAY1) \
            (__VA_ARGS__)
 
-#define BPF_HIST1(_name) \
-  BPF_TABLE("histogram", int, u64, _name, 64)
-#define BPF_HIST2(_name, _key_type) \
-  BPF_TABLE("histogram", _key_type, u64, _name, 64)
-#define BPF_HIST3(_name, _key_type, _size) \
-  BPF_TABLE("histogram", _key_type, u64, _name, _size)
-#define BPF_HISTX(_1, _2, _3, NAME, ...) NAME
-
-// Define a histogram, some arguments optional
-// BPF_HISTOGRAM(name, key_type=int, size=64)
-#define BPF_HISTOGRAM(...) \
-  BPF_HISTX(__VA_ARGS__, BPF_HIST3, BPF_HIST2, BPF_HIST1)(__VA_ARGS__)
-
 #define BPF_LPM_TRIE1(_name) \
   BPF_F_TABLE("lpm_trie", u64, u64, _name, 10240, BPF_F_NO_PREALLOC)
 #define BPF_LPM_TRIE2(_name, _key_type) \
@@ -186,19 +173,9 @@ struct _name##_table_t _name = { .max_entries = (_max_entries) }
 #define BPF_LPM_TRIE(...) \
   BPF_LPM_TRIEX(__VA_ARGS__, BPF_LPM_TRIE4, BPF_LPM_TRIE3, BPF_LPM_TRIE2, BPF_LPM_TRIE1)(__VA_ARGS__)
 
-struct bpf_stacktrace {
-  u64 ip[BPF_MAX_STACK_DEPTH];
-};
-
-#define BPF_STACK_TRACE(_name, _max_entries) \
-  BPF_TABLE("stacktrace", int, struct bpf_stacktrace, _name, _max_entries)
-
 #define BPF_PROG_ARRAY(_name, _max_entries) \
   BPF_TABLE("prog", u32, u32, _name, _max_entries)
 
-// packet parsing state machine helpers
-#define cursor_advance(_cursor, _len) \
-  ({ void *_tmp = _cursor; _cursor += _len; _tmp; })
 
 char _license[4] SEC("license") = "GPL";
 
@@ -284,25 +261,6 @@ static int (*bpf_sock_map_update)(void *map, void *key, void *value, unsigned lo
   (void *) BPF_FUNC_sock_map_update;
 static int (*bpf_xdp_adjust_meta)(void *ctx, int offset) =
   (void *) BPF_FUNC_xdp_adjust_meta;
-
-/* bcc_get_stackid will return a negative value in the case of an error
- *
- * BPF_STACK_TRACE(_name, _size) will allocate space for _size stack traces.
- *  -ENOMEM will be returned when this limit is reached.
- *
- * -EFAULT is typically returned when requesting user-space stack straces (using
- * BPF_F_USER_STACK) for kernel threads. However, a valid stackid may be
- * returned in some cases; consider a tracepoint or kprobe executing in the
- * kernel context. Given this you can typically ignore -EFAULT errors when
- * retrieving user-space stack traces.
- */
-static int (*bcc_get_stackid_)(void *ctx, void *map, u64 flags) =
-  (void *) BPF_FUNC_get_stackid;
-static inline __attribute__((always_inline))
-int bcc_get_stackid(uintptr_t map, void *ctx, u64 flags) {
-  return bcc_get_stackid_(ctx, (void *)map, flags);
-}
-
 static int (*bpf_csum_diff)(void *from, u64 from_size, void *to, u64 to_size, u64 seed) =
   (void *) BPF_FUNC_csum_diff;
 static int (*bpf_skb_get_tunnel_opt)(void *ctx, void *md, u32 size) =
@@ -412,116 +370,10 @@ unsigned __int128 bpf_hton128(unsigned __int128 val) {
   return bpf_ntoh128(val);
 }
 
-static inline __attribute__((always_inline))
-u64 load_dword(void *skb, u64 off) {
-  return ((u64)load_word(skb, off) << 32) | load_word(skb, off + 4);
-}
-
-void bpf_store_byte(void *skb, u64 off, u64 val) asm("llvm.bpf.store.byte");
-void bpf_store_half(void *skb, u64 off, u64 val) asm("llvm.bpf.store.half");
-void bpf_store_word(void *skb, u64 off, u64 val) asm("llvm.bpf.store.word");
 u64 bpf_pseudo_fd(u64, u64) asm("llvm.bpf.pseudo");
 
-static inline void __attribute__((always_inline))
-bpf_store_dword(void *skb, u64 off, u64 val) {
-  bpf_store_word(skb, off, (u32)val);
-  bpf_store_word(skb, off + 4, val >> 32);
-}
-
-#define MASK(_n) ((_n) < 64 ? (1ull << (_n)) - 1 : ((u64)-1LL))
-#define MASK128(_n) ((_n) < 128 ? ((unsigned __int128)1 << (_n)) - 1 : ((unsigned __int128)-1))
-
-static inline __attribute__((always_inline))
-unsigned int bpf_log2(unsigned int v)
-{
-  unsigned int r;
-  unsigned int shift;
-
-  r = (v > 0xFFFF) << 4; v >>= r;
-  shift = (v > 0xFF) << 3; v >>= shift; r |= shift;
-  shift = (v > 0xF) << 2; v >>= shift; r |= shift;
-  shift = (v > 0x3) << 1; v >>= shift; r |= shift;
-  r |= (v >> 1);
-  return r;
-}
-
-static inline __attribute__((always_inline))
-unsigned int bpf_log2l(unsigned long v)
-{
-  unsigned int hi = v >> 32;
-  if (hi)
-    return bpf_log2(hi) + 32 + 1;
-  else
-    return bpf_log2(v) + 1;
-}
 
 struct bpf_context;
-
-static inline __attribute__((always_inline))
-SEC("helpers")
-u64 bpf_dext_pkt(void *pkt, u64 off, u64 bofs, u64 bsz) {
-  if (bofs == 0 && bsz == 8) {
-    return load_byte(pkt, off);
-  } else if (bofs + bsz <= 8) {
-    return load_byte(pkt, off) >> (8 - (bofs + bsz))  &  MASK(bsz);
-  } else if (bofs == 0 && bsz == 16) {
-    return load_half(pkt, off);
-  } else if (bofs + bsz <= 16) {
-    return load_half(pkt, off) >> (16 - (bofs + bsz))  &  MASK(bsz);
-  } else if (bofs == 0 && bsz == 32) {
-    return load_word(pkt, off);
-  } else if (bofs + bsz <= 32) {
-    return load_word(pkt, off) >> (32 - (bofs + bsz))  &  MASK(bsz);
-  } else if (bofs == 0 && bsz == 64) {
-    return load_dword(pkt, off);
-  } else if (bofs + bsz <= 64) {
-    return load_dword(pkt, off) >> (64 - (bofs + bsz))  &  MASK(bsz);
-  }
-  return 0;
-}
-
-static inline __attribute__((always_inline))
-SEC("helpers")
-void bpf_dins_pkt(void *pkt, u64 off, u64 bofs, u64 bsz, u64 val) {
-  // The load_xxx function does a bswap before returning the short/word/dword,
-  // so the value in register will always be host endian. However, the bytes
-  // written back need to be in network order.
-  if (bofs == 0 && bsz == 8) {
-    bpf_skb_store_bytes(pkt, off, &val, 1, 0);
-  } else if (bofs + bsz <= 8) {
-    u8 v = load_byte(pkt, off);
-    v &= ~(MASK(bsz) << (8 - (bofs + bsz)));
-    v |= ((val & MASK(bsz)) << (8 - (bofs + bsz)));
-    bpf_skb_store_bytes(pkt, off, &v, 1, 0);
-  } else if (bofs == 0 && bsz == 16) {
-    u16 v = bpf_htons(val);
-    bpf_skb_store_bytes(pkt, off, &v, 2, 0);
-  } else if (bofs + bsz <= 16) {
-    u16 v = load_half(pkt, off);
-    v &= ~(MASK(bsz) << (16 - (bofs + bsz)));
-    v |= ((val & MASK(bsz)) << (16 - (bofs + bsz)));
-    v = bpf_htons(v);
-    bpf_skb_store_bytes(pkt, off, &v, 2, 0);
-  } else if (bofs == 0 && bsz == 32) {
-    u32 v = bpf_htonl(val);
-    bpf_skb_store_bytes(pkt, off, &v, 4, 0);
-  } else if (bofs + bsz <= 32) {
-    u32 v = load_word(pkt, off);
-    v &= ~(MASK(bsz) << (32 - (bofs + bsz)));
-    v |= ((val & MASK(bsz)) << (32 - (bofs + bsz)));
-    v = bpf_htonl(v);
-    bpf_skb_store_bytes(pkt, off, &v, 4, 0);
-  } else if (bofs == 0 && bsz == 64) {
-    u64 v = bpf_htonll(val);
-    bpf_skb_store_bytes(pkt, off, &v, 8, 0);
-  } else if (bofs + bsz <= 64) {
-    u64 v = load_dword(pkt, off);
-    v &= ~(MASK(bsz) << (64 - (bofs + bsz)));
-    v |= ((val & MASK(bsz)) << (64 - (bofs + bsz)));
-    v = bpf_htonll(v);
-    bpf_skb_store_bytes(pkt, off, &v, 8, 0);
-  }
-}
 
 static inline __attribute__((always_inline))
 SEC("helpers")
@@ -539,38 +391,6 @@ static inline __attribute__((always_inline))
 SEC("helpers")
 int bpf_map_delete_elem_(uintptr_t map, void *key) {
   return bpf_map_delete_elem((void *)map, key);
-}
-
-static inline __attribute__((always_inline))
-SEC("helpers")
-int bpf_l3_csum_replace_(void *ctx, u64 off, u64 from, u64 to, u64 flags) {
-  switch (flags & 0xf) {
-    case 2:
-      return bpf_l3_csum_replace(ctx, off, bpf_htons(from), bpf_htons(to), flags);
-    case 4:
-      return bpf_l3_csum_replace(ctx, off, bpf_htonl(from), bpf_htonl(to), flags);
-    case 8:
-      return bpf_l3_csum_replace(ctx, off, bpf_htonll(from), bpf_htonll(to), flags);
-    default:
-      {}
-  }
-  return bpf_l3_csum_replace(ctx, off, from, to, flags);
-}
-
-static inline __attribute__((always_inline))
-SEC("helpers")
-int bpf_l4_csum_replace_(void *ctx, u64 off, u64 from, u64 to, u64 flags) {
-  switch (flags & 0xf) {
-    case 2:
-      return bpf_l4_csum_replace(ctx, off, bpf_htons(from), bpf_htons(to), flags);
-    case 4:
-      return bpf_l4_csum_replace(ctx, off, bpf_htonl(from), bpf_htonl(to), flags);
-    case 8:
-      return bpf_l4_csum_replace(ctx, off, bpf_htonll(from), bpf_htonll(to), flags);
-    default:
-      {}
-  }
-  return bpf_l4_csum_replace(ctx, off, from, to, flags);
 }
 
 int incr_cksum_l3(void *off, u64 oldval, u64 newval) asm("llvm.bpf.extra");
@@ -659,23 +479,6 @@ int bpf_usdt_readarg_p(int argc, struct pt_regs *ctx, void *buf, u64 len) asm("l
 #error "bcc does not support this platform yet"
 #endif
 
-#define lock_xadd(ptr, val) ((void)__sync_fetch_and_add(ptr, val))
-
-#define TRACEPOINT_PROBE(category, event) \
-int tracepoint__##category##__##event(struct tracepoint__##category##__##event *args)
-
-#define TP_DATA_LOC_READ_CONST(dst, field, length)                        \
-        do {                                                              \
-            unsigned short __offset = args->data_loc_##field & 0xFFFF;    \
-            bpf_probe_read((void *)dst, length, (char *)args + __offset); \
-        } while (0);
-
-#define TP_DATA_LOC_READ(dst, field)                                        \
-        do {                                                                \
-            unsigned short __offset = args->data_loc_##field & 0xFFFF;      \
-            unsigned short __length = args->data_loc_##field >> 16;         \
-            bpf_probe_read((void *)dst, __length, (char *)args + __offset); \
-        } while (0);
 
 #endif
 )********"
