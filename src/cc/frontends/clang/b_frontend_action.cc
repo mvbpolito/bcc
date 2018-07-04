@@ -776,6 +776,8 @@ bool BTypeVisitor::VisitVarDecl(VarDecl *Decl) {
       map_type = BPF_MAP_TYPE_PERF_EVENT_ARRAY;
     } else if (A->getName() == "maps/stacktrace") {
       map_type = BPF_MAP_TYPE_STACK_TRACE;
+    } else if (A->getName() == "maps/fifo") {
+      map_type = BPF_MAP_TYPE_FIFO;
     } else if (A->getName() == "maps/extern") {
       if (!fe_.table_storage().Find(maps_ns_path, table_it)) {
         if (!fe_.table_storage().Find(global_path, table_it)) {
