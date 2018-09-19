@@ -180,6 +180,10 @@ StatusTuple BPFTable::clear_table_non_atomic() {
   return StatusTuple(0);
 }
 
+StatusTuple BPFTable::clear() {
+  return BPFTable::clear_table_non_atomic();
+}
+
 StatusTuple BPFTable::get_table_offline(
   std::vector<std::pair<std::string, std::string>> &res) {
   StatusTuple r(0);

@@ -41,6 +41,9 @@ class BPFTableBase {
   size_t capacity() { return desc.max_entries; }
   int fd() const { return desc.fd; }
 
+  // TODO: It is here only for backward compatibility
+  int get_fd() const { return fd(); }
+
   StatusTuple string_to_key(const std::string& key_str, KeyType* key) {
     return desc.key_sscanf(key_str.c_str(), key);
   }
@@ -105,6 +108,8 @@ class BPFTable : public BPFTableBase<void, void> {
   StatusTuple remove_value(const std::string& key_str);
 
   StatusTuple clear_table_non_atomic();
+  // TODO: It is here only for backward compatibility
+  StatusTuple clear();
   StatusTuple get_table_offline(std::vector<std::pair<std::string, std::string>> &res);
 
   static size_t get_possible_cpu_count();
