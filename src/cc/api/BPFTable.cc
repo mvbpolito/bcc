@@ -246,6 +246,10 @@ StatusTuple BPFTable::get_table_offline(
   return StatusTuple(0);
 }
 
+StatusTuple BPFTable::clear() {
+  return BPFTable::clear_table_non_atomic();
+}
+
 size_t BPFTable::get_possible_cpu_count() { return get_possible_cpus().size(); }
 
 BPFStackTable::BPFStackTable(const TableDesc& desc, bool use_debug_file,
@@ -624,21 +628,21 @@ StatusTuple BPFCgroupArray::remove_value(const int& index) {
   return StatusTuple(0);
 }
 
-BPFDevmapTable::BPFDevmapTable(const TableDesc& desc) 
+BPFDevmapTable::BPFDevmapTable(const TableDesc& desc)
     : BPFTableBase<int, int>(desc) {
     if(desc.type != BPF_MAP_TYPE_DEVMAP)
-      throw std::invalid_argument("Table '" + desc.name + 
+      throw std::invalid_argument("Table '" + desc.name +
                                   "' is not a devmap table");
 }
 
-StatusTuple BPFDevmapTable::update_value(const int& index, 
+StatusTuple BPFDevmapTable::update_value(const int& index,
                                          const int& value) {
     if (!this->update(const_cast<int*>(&index), const_cast<int*>(&value)))
       return StatusTuple(-1, "Error updating value: %s", std::strerror(errno));
     return StatusTuple(0);
 }
 
-StatusTuple BPFDevmapTable::get_value(const int& index, 
+StatusTuple BPFDevmapTable::get_value(const int& index,
                                       int& value) {
     if (!this->lookup(const_cast<int*>(&index), &value))
       return StatusTuple(-1, "Error getting value: %s", std::strerror(errno));
